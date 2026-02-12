@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ====================================================
-# AnyTLS-Go OpenClash 优化版 (默认端口 8443 + 自定义 SNI)
+# AnyTLS-Go 终极管理版 (默认 8443 + 自定义 SNI + 核心管理 + at 快捷键)
 # ====================================================
 
 # --- 视觉与颜色 ---
@@ -15,200 +15,126 @@ BOLD='\033[1m'
 
 # --- 全局变量 ---
 REPO="anytls/anytls-go"
-SCRIPT_URL="https://raw.githubusercontent.com/10000ge10000/own-rules/main/anytls.sh"
-
 INSTALL_DIR="/opt/anytls"
 CONFIG_DIR="/etc/anytls"
 CONFIG_FILE="${CONFIG_DIR}/server.conf"
 VERSION_FILE="${INSTALL_DIR}/version"
 SERVICE_FILE="/etc/systemd/system/anytls.service"
-SHORTCUT_BIN="/usr/bin/anytls"
+SHORTCUT_BIN="/usr/local/bin/anytls" # 统一存放路径
 GAI_CONF="/etc/gai.conf"
 
 # --- 辅助函数 ---
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 print_info() { echo -e "${CYAN}➜${PLAIN} $1"; }
 print_ok()   { echo -e "${GREEN}✔${PLAIN} $1"; }
 print_err()  { echo -e "${RED}✖${PLAIN} $1"; }
 print_warn() { echo -e "${YELLOW}⚡${PLAIN} $1"; }
 print_line() { echo -e "${CYAN}──────────────────────────────────────────────${PLAIN}"; }
 
-# --- 1. 系统检查 ---
+# --- 1. 系统与快捷键设置 ---
 check_sys() {
     [[ $EUID -ne 0 ]] && print_err "请使用 root 运行" && exit 1
-    if [ -f /etc/alpine-release ]; then
-        RELEASE="alpine"
-    elif [ -f /etc/redhat-release ]; then
-        RELEASE="centos"
-    else
-        RELEASE="debian"
-    fi
 }
 
-# --- 2. 依赖安装 ---
-install_deps() {
-    CMD_INSTALL=""
-    if command -v apt-get &>/dev/null; then
-        CMD_INSTALL="apt-get install -y"
-        apt-get update >/dev/null 2>&1
-    elif command -v yum &>/dev/null; then
-        CMD_INSTALL="yum install -y"
-    else
-        print_err "未识别的系统"
-        exit 1
-    fi
-    $CMD_INSTALL curl unzip jq net-tools iptables >/dev/null 2>&1
-}
-
-# --- 3. 快捷指令 ---
-create_shortcut() {
-    if [[ -f "$0" ]]; then
-        cp -f "$0" "$SHORTCUT_BIN"
-    else
-        wget -qO "$SHORTCUT_BIN" "$SCRIPT_URL"
-    fi
+# 设置 'at' 快捷键
+set_alias() {
+    # 将脚本复制到系统路径
+    cp "$0" "$SHORTCUT_BIN" 2>/dev/null
     chmod +x "$SHORTCUT_BIN"
-    cp -f "$SHORTCUT_BIN" "/usr/local/bin/anytls" >/dev/null 2>&1
-    chmod +x "/usr/local/bin/anytls"
+    
+    # 检查是否已经设置了 alias
+    if ! grep -q "alias at=" ~/.bashrc; then
+        echo "alias at='$SHORTCUT_BIN'" >> ~/.bashrc
+        print_ok "已添加快捷键 'at' 到 ~/.bashrc"
+    fi
+    
+    # 如果存在 zsh
+    if [ -f ~/.zshrc ] && ! grep -q "alias at=" ~/.zshrc; then
+        echo "alias at='$SHORTCUT_BIN'" >> ~/.zshrc
+        print_ok "已添加快捷键 'at' 到 ~/.zshrc"
+    fi
+    
+    # 提醒用户生效
+    print_info "快捷键设置完毕。下次登录或执行 'source ~/.bashrc' 后即可输入 'at' 呼出面板。"
 }
 
-# --- 4. 核心安装 ---
+install_deps() {
+    print_info "安装必要依赖..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update >/dev/null 2>&1
+        apt-get install -y curl unzip jq net-tools iptables >/dev/null 2>&1
+    elif command -v yum &>/dev/null; then
+        yum install -y curl unzip jq net-tools iptables >/dev/null 2>&1
+    fi
+}
+
+# --- 2. 核心安装逻辑 ---
 install_core() {
+    local target_tag=$1
     clear
     print_line
-    echo -e " ${BOLD}AnyTLS-Go 安装向导${PLAIN}"
+    echo -e " ${BOLD}AnyTLS-Go 核心管理${PLAIN}"
     print_line
     
-    print_info "获取最新版本..."
-    LATEST_JSON=$(curl -sL -H "User-Agent: Mozilla/5.0" "https://api.github.com/repos/$REPO/releases/latest")
-    
-    if [[ -z "$LATEST_JSON" ]] || echo "$LATEST_JSON" | grep -q "API rate limit"; then
-         print_err "GitHub API 受限。"
-         exit 1
+    if [[ -z "$target_tag" ]]; then
+        print_info "正在获取远程最新版本号..."
+        target_tag=$(curl -sL "https://api.github.com/repos/$REPO/releases/latest" | jq -r .tag_name)
     fi
-    
-    TARGET_VERSION=$(echo "$LATEST_JSON" | jq -r .tag_name)
-    print_info "最新版本: ${GREEN}${TARGET_VERSION}${PLAIN}"
+
+    [[ -z "$target_tag" || "$target_tag" == "null" ]] && print_err "获取版本失败" && return 1
 
     ARCH=$(uname -m)
     case $ARCH in
         x86_64|amd64) KW_ARCH="amd64" ;;
         aarch64|arm64) KW_ARCH="arm64" ;;
-        *) print_err "不支持架构: $ARCH"; exit 1 ;;
+        *) print_err "不支持架构: $ARCH"; return 1 ;;
     esac
 
-    print_info "下载中..."
-    ALL_URLS=$(echo "$LATEST_JSON" | jq -r '.assets[].browser_download_url')
-    DOWNLOAD_URL=$(echo "$ALL_URLS" | grep -i "linux" | grep -i "$KW_ARCH" | grep -i ".zip" | head -n 1)
+    print_info "准备安装版本: ${GREEN}${target_tag}${PLAIN}"
+    DOWNLOAD_URL=$(curl -sL "https://api.github.com/repos/$REPO/releases/tags/$target_tag" | jq -r '.assets[] | select(.browser_download_url | contains("linux") and contains("'"$KW_ARCH"'") and contains(".zip")) | .browser_download_url' | head -n 1)
 
     if [[ -z "$DOWNLOAD_URL" ]]; then
-        print_err "未找到适配的下载包！"
-        exit 1
+        print_err "未找到适配该架构的下载包"
+        return 1
     fi
 
+    print_info "正在下载..."
     wget -q --show-progress -O "/tmp/anytls.zip" "$DOWNLOAD_URL"
-    if [[ ! -s "/tmp/anytls.zip" ]]; then print_err "下载失败"; exit 1; fi
-
-    print_info "解压安装..."
-    rm -rf /tmp/anytls_extract
+    
     mkdir -p /tmp/anytls_extract
-    unzip -q /tmp/anytls.zip -d /tmp/anytls_extract
-    
+    unzip -qo "/tmp/anytls.zip" -d /tmp/anytls_extract
     FOUND_BIN=$(find /tmp/anytls_extract -type f -name "anytls-server" | head -n 1)
-    
-    if [[ -z "$FOUND_BIN" ]]; then
-        print_err "安装包异常，未找到文件！"
-        exit 1
+
+    if [[ -n "$FOUND_BIN" ]]; then
+        systemctl stop anytls 2>/dev/null
+        mkdir -p "$INSTALL_DIR"
+        cp -f "$FOUND_BIN" "$INSTALL_DIR/anytls-server"
+        chmod +x "$INSTALL_DIR/anytls-server"
+        echo "$target_tag" > "$VERSION_FILE"
+        print_ok "版本 ${target_tag} 安装成功"
+    else
+        print_err "安装失败：核心文件未找到"
     fi
 
-    systemctl stop anytls 2>/dev/null
-    mkdir -p "$INSTALL_DIR"
-    cp -f "$FOUND_BIN" "$INSTALL_DIR/anytls-server"
-    chmod +x "$INSTALL_DIR/anytls-server"
-    
-    echo "$TARGET_VERSION" > "$VERSION_FILE"
     rm -rf /tmp/anytls.zip /tmp/anytls_extract
-    mkdir -p "$CONFIG_DIR"
-    print_ok "核心安装完成 ($TARGET_VERSION)"
+    if [[ -f "$CONFIG_FILE" ]]; then systemctl restart anytls 2>/dev/null; fi
 }
 
-# --- 5. 系统优化 ---
-optimize_sysctl() {
-    print_info "正在优化 TCP/内核网络参数..."
-    if [[ ! -f /etc/sysctl.conf.bak ]]; then
-        cp /etc/sysctl.conf /etc/sysctl.conf.bak
-    fi
-
-    cat > /etc/sysctl.d/99-anytls.conf <<EOF
-# --- AnyTLS Optimization ---
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-net.core.rmem_max = 8388608
-net.core.wmem_max = 8388608
-net.ipv4.tcp_rmem = 4096 87380 8388608
-net.ipv4.tcp_wmem = 4096 16384 8388608
-net.ipv4.tcp_tw_reuse = 1
-net.core.somaxconn = 4096
-# ---------------------------
-EOF
-
-    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
-
-    sysctl -p /etc/sysctl.d/99-anytls.conf >/dev/null 2>&1
-    sysctl --system >/dev/null 2>&1
-    print_ok "网络优化已应用"
-}
-
-check_port() {
-    local port=$1
-    if command -v ss &>/dev/null; then
-        if ss -tunlp 2>/dev/null | grep -q ":${port} "; then return 1; fi
-    elif command -v netstat &>/dev/null; then
-        if netstat -tunlp 2>/dev/null | grep -q ":${port} "; then return 1; fi
-    fi
-    return 0
-}
-
-# --- 6. 交互配置 (默认端口改为 8443) ---
+# --- 3. 配置向导 ---
 configure() {
     clear
     print_line
     echo -e " ${BOLD}配置向导${PLAIN}"
     print_line
 
-    # 1. 端口 (修改默认值为 8443)
-    while true; do
-        read -p "$(echo -e "${CYAN}::${PLAIN} 监听端口 [回车默认 8443]: ")" PORT
-        [[ -z "${PORT}" ]] && PORT=8443
-        if check_port $PORT; then echo -e "   ➜ 使用端口: ${GREEN}$PORT${PLAIN}"; break; else print_err "端口被占用"; fi
-    done
+    read -p "$(echo -e "${CYAN}::${PLAIN} 监听端口 [回车默认 8443]: ")" PORT
+    [[ -z "${PORT}" ]] && PORT=8443
 
-    # 2. 密码
-    echo ""
-    read -p "$(echo -e "${CYAN}::${PLAIN} 连接密码 [回车随机生成]: ")" PASSWORD
-    if [[ -z "${PASSWORD}" ]]; then
-        PASSWORD=$(head /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 16)
-        echo -e "   ➜ 随机密码: ${GREEN}$PASSWORD${PLAIN}"
-    fi
+    read -p "$(echo -e "${CYAN}::${PLAIN} 连接密码 [回车随机]: ")" PASSWORD
+    [[ -z "${PASSWORD}" ]] && PASSWORD=$(head /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 16)
 
-    # 3. 伪装域名 (SNI)
-    echo ""
     read -p "$(echo -e "${CYAN}::${PLAIN} 伪装域名 (SNI) [回车默认 player.live-video.net]: ")" CUSTOM_SNI
     [[ -z "${CUSTOM_SNI}" ]] && CUSTOM_SNI="player.live-video.net"
-    echo -e "   ➜ 伪装域名: ${GREEN}$CUSTOM_SNI${PLAIN}"
 
-    # 4. IP 策略
-    echo ""
-    echo -e " ${BOLD}出站 IP 策略 (VPS侧)${PLAIN}"
-    echo -e " 1. ${GREEN}IPv4 优先${PLAIN} (推荐)"
-    echo -e " 2. ${CYAN}IPv6 优先${PLAIN}"
-    read -p " 请选择 [1-2] (默认 1): " IP_CHOICE
-    [[ -z "$IP_CHOICE" ]] && IP_CHOICE=1
-
-    apply_ip_preference "$IP_CHOICE"
-
-    # 保存配置
     cat > "$CONFIG_FILE" << EOF
 PORT="${PORT}"
 PASSWORD="${PASSWORD}"
@@ -216,7 +142,6 @@ SNI="${CUSTOM_SNI}"
 EOF
     chmod 600 "$CONFIG_FILE"
 
-    # Systemd 写入
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=AnyTLS-Go Server
@@ -226,7 +151,6 @@ After=network.target
 Type=simple
 User=root
 Nice=-10
-CPUSchedulingPolicy=batch
 ExecStart=${INSTALL_DIR}/anytls-server -l 0.0.0.0:${PORT} -p "${PASSWORD}"
 Restart=always
 RestartSec=3
@@ -236,225 +160,137 @@ LimitNOFILE=1000000
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-}
-
-# --- 7. 防火墙 ---
-apply_firewall() {
-    source "$CONFIG_FILE" 2>/dev/null
-    [[ -z "$PORT" ]] && return
-    
-    print_info "配置防火墙..."
-    if command -v firewall-cmd &>/dev/null; then
-        firewall-cmd --zone=public --add-port=${PORT}/tcp --permanent >/dev/null 2>&1
-        firewall-cmd --zone=public --add-port=${PORT}/udp --permanent >/dev/null 2>&1
-        firewall-cmd --reload >/dev/null 2>&1
-    elif command -v iptables &>/dev/null; then
-        iptables -I INPUT -p tcp --dport ${PORT} -j ACCEPT
-        iptables -I INPUT -p udp --dport ${PORT} -j ACCEPT
-        if command -v netfilter-persistent &>/dev/null; then netfilter-persistent save >/dev/null 2>&1; fi
-    fi
-}
-
-start_and_check() {
     systemctl enable anytls >/dev/null 2>&1
     systemctl restart anytls
-    sleep 2
-    if systemctl is-active --quiet anytls; then return 0; else
-        echo ""
-        print_err "启动失败！日志如下："
-        journalctl -u anytls -n 20 --no-pager
-        return 1
-    fi
 }
 
-# --- 8. 结果展示 ---
-show_result() {
-    if [[ ! -f "$CONFIG_FILE" ]]; then print_err "未找到配置"; return; fi
-    source "$CONFIG_FILE"
-    
-    [[ -z "$SNI" ]] && SNI="player.live-video.net"
+# --- 4. 核心管理菜单 ---
+menu_core_manage() {
+    clear
+    local local_v=$(cat "$VERSION_FILE" 2>/dev/null || echo "未安装")
+    print_line
+    echo -e "       ${BOLD}AnyTLS 核心管理${PLAIN}"
+    print_line
+    echo -e " 当前本地版本: ${GREEN}${local_v}${PLAIN}"
+    echo ""
+    echo -e " 1. 检查并更新至最新版本"
+    echo -e " 2. 强制重新安装当前版本"
+    echo -e " 3. 安装/回滚特定版本 (输入版本号)"
+    echo -e " 0. 返回主菜单"
+    print_line
+    read -p " 请选择: " core_choice
+    case "$core_choice" in
+        1) install_core ;;
+        2) [[ "$local_v" == "未安装" ]] && print_err "未安装核心" || install_core "$local_v" ;;
+        3) read -p "请输入版本号 (例如 v0.1.5): " custom_v
+           [[ -n "$custom_v" ]] && install_core "$custom_v" ;;
+        0) return ;;
+        *) menu_core_manage ;;
+    esac
+    read -p "按回车返回..."
+}
 
-    IPV4=$(curl -s4m8 https://api.ipify.org)
-    [[ -z "$IPV4" ]] && IPV4=$(curl -s4m8 https://ifconfig.me)
-    [[ -z "$IPV4" ]] && IPV4="无法获取IPv4"
-    
-    PARAMS="sni=${SNI}&insecure=1"
-    LINK="anytls://${PASSWORD}@${IPV4}:${PORT}?${PARAMS}#AnyTLS"
+# --- 5. 展示结果 ---
+show_result() {
+    [[ ! -f "$CONFIG_FILE" ]] && print_err "配置文件不存在" && return
+    source "$CONFIG_FILE"
+    local ip=$(curl -s4m5 https://api.ipify.org || echo "VPS_IP")
+    local link="anytls://${PASSWORD}@${ip}:${PORT}?sni=${SNI}&insecure=1#AnyTLS"
 
     clear
     print_line
     echo -e "       AnyTLS 配置详情"
     print_line
-    echo -e " IP: ${GREEN}${IPV4}${PLAIN}"
-    echo -e " 端口: ${GREEN}${PORT}${PLAIN}"
-    echo -e " SNI: ${GREEN}${SNI}${PLAIN}"
+    echo -e " 节点 IP   : ${GREEN}${ip}${PLAIN}"
+    echo -e " 端口      : ${GREEN}${PORT}${PLAIN}"
+    echo -e " 密码      : ${GREEN}${PASSWORD}${PLAIN}"
+    echo -e " 伪装 SNI  : ${GREEN}${SNI}${PLAIN}"
     echo ""
-    
-    echo -e "${BOLD} 🔗 导出链接${PLAIN}"
-    echo -e "${CYAN}${LINK}${PLAIN}"
+    echo -e "${BOLD} 🔗 链接:${PLAIN}"
+    echo -e "${CYAN}${link}${PLAIN}"
     echo ""
-    
-    echo -e "${BOLD} 📝 OpenClash 填空指引${PLAIN}"
-    echo -e "┌─────────────────────┬──────────────────────────────────────┐"
-    echo -e "│ 选项                │ 推荐填入值                           │"
-    echo -e "├─────────────────────┼──────────────────────────────────────┤"
-    printf "│ 服务器地址          │ %-36s │\n" "${IPV4}"
-    printf "│ 端口                │ %-36s │\n" "${PORT}"
-    printf "│ 密码                │ %-36s │\n" "${PASSWORD}"
-    printf "│ UDP 支持            │ %-36s │\n" "true"
-    printf "│ 跳过证书验证        │ %-36s │\n" "true"
-    printf "│ SNI                 │ %-36s │\n" "${SNI}"
-    printf "│ ALPN                │ %-36s │\n" "h2, http/1.1"
-    printf "│ 客户端指纹          │ %-36s │\n" "chrome"
-    echo -e "└─────────────────────┴──────────────────────────────────────┘"
-    echo ""
-    
-    echo -e "${BOLD} 📋 OpenClash 配置文件 (YAML)${PLAIN}"
+    echo -e "${BOLD} 📝 YAML 配置 (OpenClash):${PLAIN}"
     echo -e "${GREEN}"
     cat << EOF
   - name: "AnyTLS"
     type: anytls
-    server: "${IPV4}"
+    server: "${ip}"
     port: ${PORT}
     password: "${PASSWORD}"
     sni: "${SNI}"
     skip-cert-verify: true
     udp: true
-    alpn:
-      - h2
-      - http/1.1
-    client-fingerprint: chrome
-    idle-session-check-interval: 30
-    idle-session-timeout: 60
 EOF
     echo -e "${PLAIN}"
     print_line
 }
 
-# --- 9. IP 策略逻辑 ---
-apply_ip_preference() {
-    local choice=$1
-    if [[ ! -f "$GAI_CONF" ]]; then
-        cat > "$GAI_CONF" <<EOF
-label  ::1/128       0
-label  ::/0          1
-label  2002::/16     2
-label ::/96          3
-label ::ffff:0:0/96  4
-precedence  ::1/128       50
-precedence  ::/0          40
-precedence  2002::/16     30
-precedence ::/96          20
-precedence ::ffff:0:0/96  10
-EOF
-    fi
-
-    if [[ "$choice" == "1" ]]; then
-        if grep -q "^precedence ::ffff:0:0/96" "$GAI_CONF"; then
-            sed -i 's/^precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  100/' "$GAI_CONF"
-        else
-            echo "precedence ::ffff:0:0/96  100" >> "$GAI_CONF"
-        fi
-        print_ok "已设置: 优先使用 IPv4"
-    else
-        if grep -q "^precedence ::ffff:0:0/96" "$GAI_CONF"; then
-            sed -i 's/^precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  10/' "$GAI_CONF"
-        else
-            echo "precedence ::ffff:0:0/96  10" >> "$GAI_CONF"
-        fi
-        print_ok "已恢复: 系统默认 (IPv6 优先)"
-    fi
-}
-
-set_ip_menu() {
-    clear
-    print_line
-    echo -e " ${BOLD}出站 IP 优先级设置${PLAIN}"
-    print_line
-    if grep -q "^precedence ::ffff:0:0/96.*100" "$GAI_CONF" 2>/dev/null; then STATUS_IP="${GREEN}IPv4 优先${PLAIN}"; else STATUS_IP="${CYAN}IPv6 优先${PLAIN}"; fi
-    echo -e " 当前状态: ${STATUS_IP}\n"
-    echo -e " 1. 强制 IPv4 优先\n 2. 恢复 IPv6 优先"
-    read -p " 选择: " choice
-    [[ "$choice" == "1" || "$choice" == "2" ]] && apply_ip_preference "$choice"
-    read -p "按回车返回..."
-}
-
-# --- 10. 内核升级 ---
-update_kernel() {
-    print_info "正在检查新版本..."
-    if [[ -f "$VERSION_FILE" ]]; then LOCAL_VER=$(cat "$VERSION_FILE"); else LOCAL_VER="未知"; fi
-    LATEST_JSON=$(curl -sL --max-time 5 "https://api.github.com/repos/$REPO/releases/latest")
-    REMOTE_VER=$(echo "$LATEST_JSON" | jq -r .tag_name 2>/dev/null)
-    if [[ -z "$REMOTE_VER" || "$REMOTE_VER" == "null" ]]; then print_err "获取失败"; read -p "回车返回..."; return; fi
-    if [[ "$LOCAL_VER" == "$REMOTE_VER" ]]; then print_ok "已是最新"; read -p "回车返回..."; return; fi
-    read -p "发现新版本，升级? [y/N]: " confirm
-    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then install_core; systemctl restart anytls; read -p "完成，回车返回..."; fi
-}
-
-# --- 11. 菜单系统 ---
+# --- 6. 主菜单 ---
 show_menu() {
     clear
-    if systemctl is-active --quiet anytls; then
-        STATUS="${GREEN}● 运行中${PLAIN}"
-        PID=$(systemctl show -p MainPID anytls | cut -d= -f2)
-    else
-        STATUS="${RED}● 已停止${PLAIN}"
-        PID="N/A"
-    fi
+    local status_color="${RED}● 已停止${PLAIN}"
+    systemctl is-active --quiet anytls && status_color="${GREEN}● 运行中${PLAIN}"
+    local local_v=$(cat "$VERSION_FILE" 2>/dev/null || echo "未安装")
+    if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; else SNI="未配置"; fi
 
-    if [[ -f "$VERSION_FILE" ]]; then LOCAL_V=$(cat "$VERSION_FILE"); else LOCAL_V="未安装"; fi
-    if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; CURRENT_SNI="${SNI:-player.live-video.net}"; else CURRENT_SNI="未配置"; fi
-    
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e "           ${BOLD}AnyTLS-Go 管理面板${PLAIN}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e " 运行状态 : ${STATUS}"
-    echo -e " 进程 PID : ${YELLOW}${PID}${PLAIN}"
-    echo -e " 内核版本 : ${YELLOW}${LOCAL_V}${PLAIN}"
-    echo -e " 当前 SNI : ${CYAN}${CURRENT_SNI}${PLAIN}"
+    echo -e " 状态: ${status_color}  版本: ${YELLOW}${local_v}${PLAIN}"
+    echo -e " 端口: ${YELLOW}${PORT:-未设置}${PLAIN}      SNI: ${CYAN}${SNI}${PLAIN}"
+    echo -e " 快捷键: ${GREEN}at${PLAIN}"
     echo -e "${CYAN}────────────────────────────────────────${PLAIN}"
-    echo -e "  ${GREEN}1.${PLAIN}  安装 / 重置配置 (默认端口 8443)"
-    echo -e "  ${GREEN}2.${PLAIN}  查看当前配置"
+    echo -e "  ${GREEN}1.${PLAIN}  快速安装/重置配置"
+    echo -e "  ${GREEN}2.${PLAIN}  查看配置信息"
     echo -e "  ${GREEN}3.${PLAIN}  查看实时日志"
+    echo -e "  ${CYAN}4.${PLAIN}  核心管理 (升级/降级/重装)"
     echo -e ""
-    echo -e "  ${GREEN}4.${PLAIN}  启动服务"
-    echo -e "  ${GREEN}5.${PLAIN}  停止服务"
-    echo -e "  ${GREEN}6.${PLAIN}  重启服务"
+    echo -e "  ${GREEN}5.${PLAIN}  启动服务"
+    echo -e "  ${YELLOW}6.${PLAIN}  停止服务"
+    echo -e "  ${YELLOW}7.${PLAIN}  重启服务"
     echo -e ""
-    echo -e "  ${GREEN}7.${PLAIN}  内核升级"
-    echo -e "  ${YELLOW}9.${PLAIN}  出站 IP 偏好设置"
     echo -e "  ${RED}8.${PLAIN}  卸载程序"
     echo -e "  ${RED}0.${PLAIN}  退出脚本"
     echo -e "${CYAN}────────────────────────────────────────${PLAIN}"
     
-    read -p " 请输入选项: " num
+    read -p " 请选择: " num
     case "$num" in
-        1) check_sys; install_deps; optimize_sysctl; install_core; configure; apply_firewall
-           create_shortcut; start_and_check && show_result ;;
-        2) [[ ! -f "$CONFIG_FILE" ]] && print_err "未找到配置" && sleep 1 && show_menu; show_result; read -p "按回车返回..." ; show_menu ;;
+        1) check_sys; install_deps; install_core; configure; set_alias; show_result; read -p "回车返回..." ;;
+        2) show_result; read -p "回车返回..." ;;
         3) journalctl -u anytls -f ;;
-        4) start_and_check; read -p "按回车继续..."; show_menu ;;
-        5) systemctl stop anytls; print_warn "服务已停止"; sleep 1; show_menu ;;
-        6) start_and_check; read -p "按回车继续..."; show_menu ;;
-        7) update_kernel; show_menu ;;
-        9) set_ip_menu; show_menu ;;
-        8) uninstall; exit 0 ;;
+        4) menu_core_manage ;;
+        5) systemctl start anytls; print_ok "已尝试启动" ; sleep 1 ;;
+        6) systemctl stop anytls; print_warn "服务已停止" ; sleep 1 ;;
+        7) systemctl restart anytls; print_ok "已尝试重启" ; sleep 1 ;;
+        8) uninstall ;;
         0) exit 0 ;;
         *) show_menu ;;
     esac
+    show_menu
 }
 
 uninstall() {
-    read -p " 确定要卸载 AnyTLS 吗? [y/N]: " confirm
-    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return
-    systemctl stop anytls && systemctl disable anytls
-    rm -f "$SERVICE_FILE" "/usr/bin/anytls" "/usr/local/bin/anytls"
-    rm -rf "$INSTALL_DIR" "$CONFIG_DIR"
-    systemctl daemon-reload && print_ok "卸载完成。"
+    read -p "确定要卸载吗? [y/N]: " confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        systemctl stop anytls && systemctl disable anytls
+        rm -rf "$INSTALL_DIR" "$CONFIG_DIR" "$SERVICE_FILE" "$SHORTCUT_BIN"
+        sed -i '/alias at=/d' ~/.bashrc 2>/dev/null
+        sed -i '/alias at=/d' ~/.zshrc 2>/dev/null
+        print_ok "卸载成功，快捷键已移除"
+    fi
 }
 
-run_install() {
-    check_sys; install_deps; optimize_sysctl; install_core; create_shortcut; configure; apply_firewall; start_and_check && show_result
-}
-
-if [[ -f "$CONFIG_FILE" && "$1" != "install" ]]; then show_menu; else run_install; fi
+# 脚本运行入口
+check_sys
+if [[ ! -f "$CONFIG_FILE" || "$1" == "install" ]]; then
+    # 首次运行或强制安装
+    install_deps
+    install_core
+    configure
+    set_alias
+    show_result
+else
+    # 正常进入菜单前确保 alias 已存在
+    set_alias > /dev/null 2>&1
+    show_menu
+fi
