@@ -29,3 +29,6 @@
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/connerhsu/Anytls-/refs/heads/main/Anytls-Go-Connor.sh)
+
+### 2. 快捷管理
+安装完成后，只需在终端输入 at 即可进入交互式管理菜单。
