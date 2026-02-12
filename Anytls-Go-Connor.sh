@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ====================================================
-# AnyTLS-Go OpenClash 优化版 (自定义 SNI 域名增强版)
+# AnyTLS-Go OpenClash 优化版 (默认端口 8443 + 自定义 SNI)
 # ====================================================
 
 # --- 视觉与颜色 ---
@@ -170,17 +170,17 @@ check_port() {
     return 0
 }
 
-# --- 6. 交互配置 (增加域名自定义) ---
+# --- 6. 交互配置 (默认端口改为 8443) ---
 configure() {
     clear
     print_line
     echo -e " ${BOLD}配置向导${PLAIN}"
     print_line
 
-    # 1. 端口
+    # 1. 端口 (修改默认值为 8443)
     while true; do
-        read -p "$(echo -e "${CYAN}::${PLAIN} 监听端口 [回车默认 9527]: ")" PORT
-        [[ -z "${PORT}" ]] && PORT=9527
+        read -p "$(echo -e "${CYAN}::${PLAIN} 监听端口 [回车默认 8443]: ")" PORT
+        [[ -z "${PORT}" ]] && PORT=8443
         if check_port $PORT; then echo -e "   ➜ 使用端口: ${GREEN}$PORT${PLAIN}"; break; else print_err "端口被占用"; fi
     done
 
@@ -192,7 +192,7 @@ configure() {
         echo -e "   ➜ 随机密码: ${GREEN}$PASSWORD${PLAIN}"
     fi
 
-    # 3. 伪装域名 (SNI) - 新增
+    # 3. 伪装域名 (SNI)
     echo ""
     read -p "$(echo -e "${CYAN}::${PLAIN} 伪装域名 (SNI) [回车默认 player.live-video.net]: ")" CUSTOM_SNI
     [[ -z "${CUSTOM_SNI}" ]] && CUSTOM_SNI="player.live-video.net"
@@ -208,7 +208,7 @@ configure() {
 
     apply_ip_preference "$IP_CHOICE"
 
-    # 保存至配置文件
+    # 保存配置
     cat > "$CONFIG_FILE" << EOF
 PORT="${PORT}"
 PASSWORD="${PASSWORD}"
@@ -216,7 +216,7 @@ SNI="${CUSTOM_SNI}"
 EOF
     chmod 600 "$CONFIG_FILE"
 
-    # 写入 Systemd
+    # Systemd 写入
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=AnyTLS-Go Server
@@ -267,12 +267,11 @@ start_and_check() {
     fi
 }
 
-# --- 8. 结果展示 (使用配置文件的 SNI) ---
+# --- 8. 结果展示 ---
 show_result() {
     if [[ ! -f "$CONFIG_FILE" ]]; then print_err "未找到配置"; return; fi
     source "$CONFIG_FILE"
     
-    # 兼容旧版本配置文件，如果没有 SNI 变量则设为默认
     [[ -z "$SNI" ]] && SNI="player.live-video.net"
 
     IPV4=$(curl -s4m8 https://api.ipify.org)
@@ -367,10 +366,34 @@ EOF
     fi
 }
 
+set_ip_menu() {
+    clear
+    print_line
+    echo -e " ${BOLD}出站 IP 优先级设置${PLAIN}"
+    print_line
+    if grep -q "^precedence ::ffff:0:0/96.*100" "$GAI_CONF" 2>/dev/null; then STATUS_IP="${GREEN}IPv4 优先${PLAIN}"; else STATUS_IP="${CYAN}IPv6 优先${PLAIN}"; fi
+    echo -e " 当前状态: ${STATUS_IP}\n"
+    echo -e " 1. 强制 IPv4 优先\n 2. 恢复 IPv6 优先"
+    read -p " 选择: " choice
+    [[ "$choice" == "1" || "$choice" == "2" ]] && apply_ip_preference "$choice"
+    read -p "按回车返回..."
+}
+
+# --- 10. 内核升级 ---
+update_kernel() {
+    print_info "正在检查新版本..."
+    if [[ -f "$VERSION_FILE" ]]; then LOCAL_VER=$(cat "$VERSION_FILE"); else LOCAL_VER="未知"; fi
+    LATEST_JSON=$(curl -sL --max-time 5 "https://api.github.com/repos/$REPO/releases/latest")
+    REMOTE_VER=$(echo "$LATEST_JSON" | jq -r .tag_name 2>/dev/null)
+    if [[ -z "$REMOTE_VER" || "$REMOTE_VER" == "null" ]]; then print_err "获取失败"; read -p "回车返回..."; return; fi
+    if [[ "$LOCAL_VER" == "$REMOTE_VER" ]]; then print_ok "已是最新"; read -p "回车返回..."; return; fi
+    read -p "发现新版本，升级? [y/N]: " confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then install_core; systemctl restart anytls; read -p "完成，回车返回..."; fi
+}
+
 # --- 11. 菜单系统 ---
 show_menu() {
     clear
-    # 状态检测
     if systemctl is-active --quiet anytls; then
         STATUS="${GREEN}● 运行中${PLAIN}"
         PID=$(systemctl show -p MainPID anytls | cut -d= -f2)
@@ -379,19 +402,8 @@ show_menu() {
         PID="N/A"
     fi
 
-    if [[ -f "$VERSION_FILE" ]]; then
-        LOCAL_V=$(cat "$VERSION_FILE")
-    else
-        LOCAL_V="未安装"
-    fi
-
-    # 获取当前配置的域名显示
-    if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE"
-        CURRENT_SNI="${SNI:-player.live-video.net}"
-    else
-        CURRENT_SNI="未配置"
-    fi
+    if [[ -f "$VERSION_FILE" ]]; then LOCAL_V=$(cat "$VERSION_FILE"); else LOCAL_V="未安装"; fi
+    if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; CURRENT_SNI="${SNI:-player.live-video.net}"; else CURRENT_SNI="未配置"; fi
     
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e "           ${BOLD}AnyTLS-Go 管理面板${PLAIN}"
@@ -401,7 +413,7 @@ show_menu() {
     echo -e " 内核版本 : ${YELLOW}${LOCAL_V}${PLAIN}"
     echo -e " 当前 SNI : ${CYAN}${CURRENT_SNI}${PLAIN}"
     echo -e "${CYAN}────────────────────────────────────────${PLAIN}"
-    echo -e "  ${GREEN}1.${PLAIN}  安装 / 重置配置 (包含自定义域名)"
+    echo -e "  ${GREEN}1.${PLAIN}  安装 / 重置配置 (默认端口 8443)"
     echo -e "  ${GREEN}2.${PLAIN}  查看当前配置"
     echo -e "  ${GREEN}3.${PLAIN}  查看实时日志"
     echo -e ""
@@ -432,21 +444,6 @@ show_menu() {
     esac
 }
 
-# (其余辅助函数 update_kernel, uninstall, set_ip_menu 逻辑保持不变...)
-
-# ... [省略重复的内核升级和卸载逻辑，与上一版一致，确保代码完整性] ...
-
-update_kernel() {
-    print_info "正在检查新版本..."
-    if [[ -f "$VERSION_FILE" ]]; then LOCAL_VER=$(cat "$VERSION_FILE"); else LOCAL_VER="未知"; fi
-    LATEST_JSON=$(curl -sL --max-time 5 "https://api.github.com/repos/$REPO/releases/latest")
-    REMOTE_VER=$(echo "$LATEST_JSON" | jq -r .tag_name 2>/dev/null)
-    if [[ -z "$REMOTE_VER" || "$REMOTE_VER" == "null" ]]; then print_err "获取失败"; read -p "回车返回..."; return; fi
-    if [[ "$LOCAL_VER" == "$REMOTE_VER" ]]; then print_ok "已是最新"; read -p "回车返回..."; return; fi
-    read -p "发现新版本，升级? [y/N]: " confirm
-    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then install_core; systemctl restart anytls; read -p "完成，回车返回..."; fi
-}
-
 uninstall() {
     read -p " 确定要卸载 AnyTLS 吗? [y/N]: " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return
@@ -454,19 +451,6 @@ uninstall() {
     rm -f "$SERVICE_FILE" "/usr/bin/anytls" "/usr/local/bin/anytls"
     rm -rf "$INSTALL_DIR" "$CONFIG_DIR"
     systemctl daemon-reload && print_ok "卸载完成。"
-}
-
-set_ip_menu() {
-    clear
-    print_line
-    echo -e " ${BOLD}出站 IP 优先级设置${PLAIN}"
-    print_line
-    if grep -q "^precedence ::ffff:0:0/96.*100" "$GAI_CONF" 2>/dev/null; then STATUS_IP="${GREEN}IPv4 优先${PLAIN}"; else STATUS_IP="${CYAN}IPv6 优先${PLAIN}"; fi
-    echo -e " 当前状态: ${STATUS_IP}\n"
-    echo -e " 1. 强制 IPv4 优先\n 2. 恢复 IPv6 优先"
-    read -p " 选择: " choice
-    [[ "$choice" == "1" || "$choice" == "2" ]] && apply_ip_preference "$choice"
-    read -p "按回车返回..."
 }
 
 run_install() {
