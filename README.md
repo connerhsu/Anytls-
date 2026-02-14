@@ -28,4 +28,4 @@
 在您的 VPS 终端复制并粘贴以下命令：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/connerhsu/Anytls-/refs/heads/main/Anytls-Go-Connor.sh)
+bash <(curl -sSL https://raw.githubusercontent.com/connerhsu/Anytls-/main/Anytls-Fix.sh)
