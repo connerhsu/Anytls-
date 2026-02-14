@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ====================================================
-# AnyTLS-Go 终极管理版 V3.0
+# AnyTLS-Go 管理脚本 (修复快捷键 + 独立配置修改)
 # ====================================================
 
-# --- 颜色与样式 ---
+# --- 颜色定义 ---
 RED='\033[31m'
 GREEN='\033[32m'
 YELLOW='\033[33m'
@@ -13,210 +13,268 @@ CYAN='\033[36m'
 PLAIN='\033[0m'
 BOLD='\033[1m'
 
-# --- 核心路径 ---
-REPO="anytls/anytls-go"
+# --- 路径定义 ---
+# 真正的脚本安装路径，不直接叫 at，避免被系统误删
+REAL_SCRIPT_PATH="/usr/local/bin/anytls-menu"
 INSTALL_DIR="/opt/anytls"
 CONFIG_DIR="/etc/anytls"
 CONFIG_FILE="${CONFIG_DIR}/server.conf"
 VERSION_FILE="${INSTALL_DIR}/version"
 SERVICE_FILE="/etc/systemd/system/anytls.service"
-AT_BIN="/usr/local/bin/at"
 
-# --- 基础工具 ---
-print_info() { echo -e "${CYAN}➜${PLAIN} $1"; }
-print_ok()   { echo -e "${GREEN}✔${PLAIN} $1"; }
-print_err()  { echo -e "${RED}✖${PLAIN} $1"; }
-print_warn() { echo -e "${YELLOW}⚡${PLAIN} $1"; }
-print_line() { echo -e "${CYAN}──────────────────────────────────────────────${PLAIN}"; }
+# --- 1. 基础检查与快捷键修复 ---
+check_root() {
+    [[ $EUID -ne 0 ]] && echo -e "${RED}请使用 root 权限运行!${PLAIN}" && exit 1
+}
 
-# --- 1. 环境初始化与强制快捷键 ---
-init_at() {
-    [[ $EUID -ne 0 ]] && print_err "请使用 root 权限运行" && exit 1
-    
-    # 安装必要组件
-    if command -v apt-get &>/dev/null; then
-        apt-get update >/dev/null 2>&1
-        apt-get install -y curl unzip jq net-tools iptables wget >/dev/null 2>&1
-    elif command -v yum &>/dev/null; then
-        yum install -y curl unzip jq net-tools iptables wget >/dev/null 2>&1
+install_tools() {
+    if ! command -v jq &>/dev/null; then
+        echo "安装必要工具..."
+        if command -v apt-get &>/dev/null; then
+            apt-get update -y >/dev/null 2>&1
+            apt-get install -y curl unzip jq net-tools wget >/dev/null 2>&1
+        elif command -v yum &>/dev/null; then
+            yum install -y curl unzip jq net-tools wget >/dev/null 2>&1
+        fi
+    fi
+}
+
+# --- 核心：修复 at 快捷键 ---
+fix_shortcut() {
+    # 1. 将当前脚本内容保存到系统路径
+    cat "$0" > "$REAL_SCRIPT_PATH"
+    chmod +x "$REAL_SCRIPT_PATH"
+
+    # 2. 暴力写入别名到配置文件
+    local shell_rc=""
+    if [[ "$SHELL" == */zsh ]]; then
+        shell_rc="$HOME/.zshrc"
+    else
+        shell_rc="$HOME/.bashrc"
     fi
 
-    # 1. 物理链接：直接把脚本拷贝到系统二进制路径
-    cp -f "$0" "$AT_BIN"
-    chmod +x "$AT_BIN"
+    # 删除旧的 alias at 设置 (防止重复)
+    sed -i '/alias at=/d' "$shell_rc" 2>/dev/null
     
-    # 2. 别名保障：写入 shell 配置文件
-    for rc in ~/.bashrc ~/.zshrc; do
-        if [ -f "$rc" ]; then
-            sed -i '/alias at=/d' "$rc"
-            echo "alias at='$AT_BIN'" >> "$rc"
-        fi
-    done
+    # 写入新的 alias
+    echo "alias at='bash $REAL_SCRIPT_PATH'" >> "$shell_rc"
+
+    # 3. 尝试在当前 Shell 临时生效 (虽然子进程无法影响父进程，但尽量尝试)
+    alias at="bash $REAL_SCRIPT_PATH"
 }
 
-# --- 2. 修改配置入口 (新增) ---
-modify_config() {
-    [[ ! -f "$CONFIG_FILE" ]] && print_err "请先执行安装！" && return
-    source "$CONFIG_FILE"
-    
-    clear
-    print_line
-    echo -e "       ${BOLD}修改 AnyTLS 配置${PLAIN}"
-    print_line
-    echo -e " 当前端口: ${YELLOW}${PORT}${PLAIN}"
-    echo -e " 当前 SNI : ${YELLOW}${SNI}${PLAIN}"
-    echo ""
-    
-    read -p "请输入新端口 [直接回车不修改]: " NEW_PORT
-    PORT=${NEW_PORT:-$PORT}
-    
-    read -p "请输入新 SNI [直接回车不修改]: " NEW_SNI
-    SNI=${NEW_SNI:-$SNI}
-    
-    # 保存新配置
-    cat > "$CONFIG_FILE" << EOF
-PORT="${PORT}"
-PASSWORD="${PASSWORD}"
-SNI="${SNI}"
-EOF
-    
-    # 更新 Systemd 执行命令
-    sed -i "s|ExecStart=.*|ExecStart=${INSTALL_DIR}/anytls-server -l 0.0.0.0:${PORT} -p \"${PASSWORD}\"|" "$SERVICE_FILE"
-    
-    systemctl daemon-reload
-    systemctl restart anytls
-    print_ok "配置修改成功并已重启服务！"
-    sleep 2
-}
+# --- 2. 核心功能逻辑 ---
 
-# --- 3. 核心安装逻辑 ---
-install_core() {
-    local target_tag=$1
+# 更新/安装核心
+update_core() {
+    local target=$1
     clear
-    print_line
-    echo -e " ${BOLD}AnyTLS-Go 核心安装/更新${PLAIN}"
-    print_line
+    echo -e "${CYAN}正在获取最新版本信息...${PLAIN}"
     
-    target_tag=$(curl -sL "https://api.github.com/repos/$REPO/releases/latest" | jq -r .tag_name)
-    [[ -z "$target_tag" || "$target_tag" == "null" ]] && print_err "网络异常，请检查 GitHub 连通性" && return 1
+    if [[ -z "$target" ]]; then
+        target=$(curl -sL "https://api.github.com/repos/anytls/anytls-go/releases/latest" | jq -r .tag_name)
+    fi
+
+    [[ -z "$target" || "$target" == "null" ]] && echo -e "${RED}获取版本失败${PLAIN}" && return
 
     ARCH=$(uname -m)
     case $ARCH in
-        x86_64|amd64) KW_ARCH="amd64" ;;
-        aarch64|arm64) KW_ARCH="arm64" ;;
-        *) print_err "不支持的架构: $ARCH"; return 1 ;;
+        x86_64|amd64) KW="amd64" ;;
+        aarch64|arm64) KW="arm64" ;;
+        *) echo -e "${RED}不支持的架构: $ARCH${PLAIN}"; return ;;
     esac
 
-    print_info "正在下载版本: ${GREEN}${target_tag}${PLAIN}"
-    URL=$(curl -sL "https://api.github.com/repos/$REPO/releases/tags/$target_tag" | jq -r '.assets[] | select(.browser_download_url | contains("linux") and contains("'"$KW_ARCH"'") and contains(".zip")) | .browser_download_url' | head -n 1)
+    echo -e "准备安装版本: ${GREEN}${target}${PLAIN}"
+    URL=$(curl -sL "https://api.github.com/repos/anytls/anytls-go/releases/tags/$target" | jq -r '.assets[] | select(.browser_download_url | contains("linux") and contains("'"$KW"'") and contains(".zip")) | .browser_download_url' | head -n 1)
 
-    wget -q --show-progress -O "/tmp/anytls.zip" "$URL"
-    mkdir -p /tmp/anytls_ext
-    unzip -qo "/tmp/anytls.zip" -d /tmp/anytls_ext
+    wget -q --show-progress -O /tmp/anytls.zip "$URL"
+    mkdir -p /tmp/anytls_tmp
+    unzip -qo /tmp/anytls.zip -d /tmp/anytls_tmp
     
-    BIN=$(find /tmp/anytls_ext -type f -name "anytls-server" | head -n 1)
+    BIN=$(find /tmp/anytls_tmp -type f -name "anytls-server" | head -n 1)
     if [[ -n "$BIN" ]]; then
         systemctl stop anytls 2>/dev/null
         mkdir -p "$INSTALL_DIR"
         cp -f "$BIN" "$INSTALL_DIR/anytls-server"
         chmod +x "$INSTALL_DIR/anytls-server"
-        echo "$target_tag" > "$VERSION_FILE"
-        print_ok "核心部署成功"
+        echo "$target" > "$VERSION_FILE"
+        echo -e "${GREEN}核心更新成功!${PLAIN}"
+    else
+        echo -e "${RED}文件解压失败${PLAIN}"
     fi
-    rm -rf /tmp/anytls.zip /tmp/anytls_ext
+    rm -rf /tmp/anytls.zip /tmp/anytls_tmp
 }
 
-# --- 4. 首次安装向导 ---
-configure_first() {
-    clear
-    print_line
-    echo -e " ${BOLD}AnyTLS 首次配置 (回车使用默认)${PLAIN}"
-    print_line
-    read -p ":: 端口 [默认 8443]: " PORT
-    PORT=${PORT:-8443}
-    read -p ":: 密码 [默认 随机]: " PASSWORD
-    PASSWORD=${PASSWORD:-$(head /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 16)}
-    read -p ":: SNI  [默认 player.live-video.net]: " SNI
-    SNI=${SNI:-player.live-video.net}
-
-    mkdir -p "$CONFIG_DIR"
-    echo -e "PORT=\"${PORT}\"\nPASSWORD=\"${PASSWORD}\"\nSNI=\"${SNI}\"" > "$CONFIG_FILE"
+# 修改端口和域名 (重写)
+modify_config() {
+    [[ ! -f "$CONFIG_FILE" ]] && echo -e "${RED}请先执行安装!${PLAIN}" && return
+    source "$CONFIG_FILE"
     
+    clear
+    echo -e "${BOLD}=== 修改配置 ===${PLAIN}"
+    echo -e "当前端口: ${GREEN}${PORT}${PLAIN}"
+    echo -e "当前域名: ${GREEN}${SNI}${PLAIN}"
+    echo "------------------------"
+    
+    read -p "请输入新端口 [回车保持 ${PORT}]: " NEW_PORT
+    read -p "请输入新域名 [回车保持 ${SNI}]: " NEW_SNI
+    
+    # 如果用户直接回车，则使用旧值
+    [[ -z "$NEW_PORT" ]] && NEW_PORT="$PORT"
+    [[ -z "$NEW_SNI" ]] && NEW_SNI="$SNI"
+    
+    # 1. 更新配置文件
+    cat > "$CONFIG_FILE" << EOF
+PORT="${NEW_PORT}"
+PASSWORD="${PASSWORD}"
+SNI="${NEW_SNI}"
+EOF
+
+    # 2. 更新服务文件 (因为端口是写死在启动命令里的)
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=AnyTLS-Go Server
 After=network.target
+
 [Service]
 Type=simple
 User=root
+Nice=-10
+ExecStart=${INSTALL_DIR}/anytls-server -l 0.0.0.0:${NEW_PORT} -p "${PASSWORD}"
+Restart=always
+RestartSec=3
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # 3. 重启应用
+    systemctl daemon-reload
+    systemctl restart anytls
+    
+    echo -e "${GREEN}修改成功！正在重启服务...${PLAIN}"
+    sleep 2
+    show_info
+}
+
+# 首次安装配置
+first_install() {
+    fix_shortcut # 确保快捷键安装
+    update_core  # 下载核心
+    
+    clear
+    echo -e "${BOLD}=== 快速初始化 ===${PLAIN}"
+    read -p "端口 [默认 8443]: " PORT
+    [[ -z "$PORT" ]] && PORT=8443
+    
+    read -p "密码 [默认 随机]: " PASSWORD
+    [[ -z "$PASSWORD" ]] && PASSWORD=$(head /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 16)
+    
+    read -p "伪装域名 [默认 player.live-video.net]: " SNI
+    [[ -z "$SNI" ]] && SNI="player.live-video.net"
+    
+    mkdir -p "$CONFIG_DIR"
+    # 保存配置供后续读取
+    cat > "$CONFIG_FILE" << EOF
+PORT="${PORT}"
+PASSWORD="${PASSWORD}"
+SNI="${SNI}"
+EOF
+
+    # 写入服务
+    cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=AnyTLS-Go Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Nice=-10
 ExecStart=${INSTALL_DIR}/anytls-server -l 0.0.0.0:${PORT} -p "${PASSWORD}"
 Restart=always
+RestartSec=3
 LimitNOFILE=1000000
+
 [Install]
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable anytls && systemctl restart anytls
-}
-
-# --- 5. 主菜单 ---
-main_menu() {
-    clear
-    local status="${RED}● 已停止${PLAIN}"
-    systemctl is-active --quiet anytls && status="${GREEN}● 运行中${PLAIN}"
-    local ver=$(cat "$VERSION_FILE" 2>/dev/null || echo "未安装")
-    [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
-
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e "           ${BOLD}AnyTLS-Go 管理面板${PLAIN}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e " 状态: ${status}   版本: ${YELLOW}${ver}${PLAIN}"
-    echo -e " 域名: ${CYAN}${SNI:-未设置}${PLAIN}   端口: ${YELLOW}${PORT:-N/A}${PLAIN}"
-    echo -e " 命令: ${GREEN}at${PLAIN}"
-    echo -e "${CYAN}────────────────────────────────────────${PLAIN}"
-    echo -e "  ${GREEN}1.${PLAIN} 安装 / 重置配置"
-    echo -e "  ${GREEN}2.${PLAIN} 查看配置 (分享链接/YAML)"
-    echo -e "  ${GREEN}3.${PLAIN} 查看实时日志"
-    echo -e "  ${CYAN}4.${PLAIN} 核心管理 (升级/回滚)"
-    echo -e "  ${BLUE}5.${PLAIN} 修改端口与域名 (快捷入口)"
-    echo -e ""
-    echo -e "  ${GREEN}6.${PLAIN} 启动服务      ${YELLOW}7.${PLAIN} 停止服务"
-    echo -e "  ${YELLOW}8.${PLAIN} 重启服务      ${RED}9.${PLAIN} 卸载程序"
-    echo -e "  ${RED}0.${PLAIN} 退出"
-    echo -e "${CYAN}────────────────────────────────────────${PLAIN}"
+    systemctl enable anytls
+    systemctl restart anytls
     
-    read -p " 请选择: " choice
-    case "$choice" in
-        1) init_at; install_core; configure_first; main_menu ;;
-        2) source "$CONFIG_FILE"
-           local ip=$(curl -s4m5 https://api.ipify.org)
-           clear
-           print_line
-           echo -e " 分享链接: ${CYAN}anytls://${PASSWORD}@${ip}:${PORT}?sni=${SNI}&insecure=1#Node${PLAIN}"
-           print_line
-           read -p "回车返回..." ;;
+    show_info
+}
+
+show_info() {
+    [[ ! -f "$CONFIG_FILE" ]] && return
+    source "$CONFIG_FILE"
+    IP=$(curl -s4m5 https://api.ipify.org)
+    
+    clear
+    echo -e "${GREEN}AnyTLS 运行中${PLAIN}"
+    echo -e "IP: $IP   端口: $PORT   域名: $SNI"
+    echo -e "链接: ${CYAN}anytls://${PASSWORD}@${IP}:${PORT}?sni=${SNI}&insecure=1#Node${PLAIN}"
+    echo ""
+    read -p "按回车返回菜单..."
+}
+
+# --- 3. 菜单系统 ---
+menu() {
+    clear
+    # 每次进入菜单都尝试刷新快捷键逻辑
+    fix_shortcut >/dev/null 2>&1
+    
+    VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "未安装")
+    STATUS="${RED}停止${PLAIN}"
+    systemctl is-active --quiet anytls && STATUS="${GREEN}运行中${PLAIN}"
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    echo -e "           ${BOLD}AnyTLS-Go 面板 V4.0${PLAIN}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    echo -e " 状态: ${STATUS}      核心版本: ${YELLOW}${VER}${PLAIN}"
+    echo -e " 快捷键: 输入 ${GREEN}at${PLAIN} 即可唤出本菜单"
+    echo -e "----------------------------------------"
+    echo -e " 1. 安装 / 重置 (8443 + Twitch伪装)"
+    echo -e " 2. 查看配置链接"
+    echo -e " 3. 查看运行日志"
+    echo -e " 4. 核心管理 (升级/降级)"
+    echo -e " 5. ${YELLOW}修改端口 & 伪装域名${PLAIN} (新)"
+    echo -e ""
+    echo -e " 6. 启动服务    7. 停止服务    8. 重启服务"
+    echo -e " 9. 卸载脚本    0. 退出"
+    echo -e "----------------------------------------"
+    
+    read -p "请选择: " num
+    case "$num" in
+        1) install_tools; first_install ;;
+        2) show_info ;;
         3) journalctl -u anytls -f ;;
-        4) install_core; main_menu ;;
-        5) modify_config; main_menu ;;
-        6) systemctl start anytls; main_menu ;;
-        7) systemctl stop anytls; main_menu ;;
-        8) systemctl restart anytls; main_menu ;;
-        9) uninstall ;;
+        4) update_core ;;
+        5) modify_config ;; # 这里是你要的新入口
+        6) systemctl start anytls; menu ;;
+        7) systemctl stop anytls; menu ;;
+        8) systemctl restart anytls; menu ;;
+        9) 
+           systemctl stop anytls; systemctl disable anytls
+           rm -rf /opt/anytls /etc/anytls /usr/local/bin/anytls-menu
+           sed -i '/alias at=/d' ~/.bashrc
+           echo "已卸载"; exit 0 ;;
         0) exit 0 ;;
-        *) main_menu ;;
+        *) menu ;;
     esac
+    menu
 }
 
-uninstall() {
-    read -p "确定卸载? [y/N]: " res
-    if [[ "$res" == "y" ]]; then
-        systemctl stop anytls && systemctl disable anytls
-        rm -rf "$INSTALL_DIR" "$CONFIG_DIR" "$SERVICE_FILE" "$AT_BIN"
-        print_ok "卸载完成！"
-        exit 0
-    fi
-}
-
-# --- 运行入口 ---
-init_at > /dev/null 2>&1
-main_menu
+# --- 入口 ---
+check_root
+# 如果带参数 install 则直接跑安装流程
+if [[ "$1" == "install" ]]; then
+    install_tools
+    fix_shortcut
+    first_install
+else
+    # 否则进入菜单
+    menu
+fi
