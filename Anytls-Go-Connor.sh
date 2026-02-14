@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ====================================================
-# AnyTLS-Go 终极强制覆盖版 V6.0 (Clean & Force)
+# AnyTLS-Go 系统修复版 (快捷键: anytls)
 # ====================================================
 
-# --- 颜色 ---
+# --- 颜色定义 ---
 RED='\033[31m'
 GREEN='\033[32m'
 YELLOW='\033[33m'
@@ -13,7 +13,7 @@ CYAN='\033[36m'
 PLAIN='\033[0m'
 BOLD='\033[1m'
 
-# --- 路径与变量 ---
+# --- 路径定义 ---
 REPO="anytls/anytls-go"
 INSTALL_DIR="/opt/anytls"
 CONFIG_DIR="/etc/anytls"
@@ -21,52 +21,33 @@ CONFIG_FILE="${CONFIG_DIR}/server.conf"
 VERSION_FILE="${INSTALL_DIR}/version"
 SERVICE_FILE="/etc/systemd/system/anytls.service"
 
-# 新快捷键
-SHORTCUT_NAME="ats"
-SHORTCUT_BIN="/usr/local/bin/${SHORTCUT_NAME}"
+# 最终快捷键路径 (直接写入系统二进制目录)
+TARGET_BIN="/usr/local/bin/anytls"
 
-# 旧的残留文件 (用于清理)
-OLD_BINS=("/usr/local/bin/at" "/usr/local/bin/anytls-menu" "/usr/bin/anytls")
-
-# --- 1. 强制清理与环境初始化 (关键) ---
-cleanup_legacy() {
-    # 1. 删除旧的快捷键文件
-    for bin in "${OLD_BINS[@]}"; do
-        if [[ -f "$bin" ]]; then
-            rm -f "$bin"
-            # echo "已清理旧文件: $bin"
-        fi
-    done
-
-    # 2. 清理 Shell 配置文件中的旧别名
+# --- 1. 环境清理与修复 (关键步骤) ---
+fix_environment() {
+    # 1. 删除导致冲突的旧快捷键
+    rm -f /usr/local/bin/at
+    rm -f /usr/local/bin/ats
+    rm -f /usr/local/bin/anytls-menu
+    
+    # 2. 清理 Shell 配置文件中的残留别名
     for rc in ~/.bashrc ~/.zshrc; do
         if [ -f "$rc" ]; then
-            # 删除包含 "alias at=" 的行
             sed -i '/alias at=/d' "$rc"
-            # 删除包含 "alias anytls=" 的行
+            sed -i '/alias ats=/d' "$rc"
             sed -i '/alias anytls=/d' "$rc"
-            # 防止重复，先删除当前的 ats 别名
-            sed -i "/alias ${SHORTCUT_NAME}=/d" "$rc"
         fi
     done
-}
-
-install_shortcut() {
-    # 1. 强制覆盖写入新的快捷键文件
-    cp -f "$0" "$SHORTCUT_BIN"
-    chmod +x "$SHORTCUT_BIN"
-
-    # 2. 写入新的别名
-    for rc in ~/.bashrc ~/.zshrc; do
-        if [ -f "$rc" ]; then
-            echo "alias ${SHORTCUT_NAME}='${SHORTCUT_BIN}'" >> "$rc"
-        fi
-    done
+    
+    # 3. 安装当前的正确命令
+    cp -f "$0" "$TARGET_BIN"
+    chmod +x "$TARGET_BIN"
 }
 
 # --- 2. 基础检查 ---
 check_root() {
-    [[ $EUID -ne 0 ]] && echo -e "${RED}请使用 root 权限!${PLAIN}" && exit 1
+    [[ $EUID -ne 0 ]] && echo -e "${RED}必须使用 root 权限运行！${PLAIN}" && exit 1
 }
 
 install_deps() {
@@ -82,11 +63,11 @@ install_deps() {
 
 # --- 3. 核心功能 ---
 
-# 更新核心
+# 核心下载/更新
 update_core() {
     local target=$1
     clear
-    echo -e "${CYAN}正在检查 GitHub 版本...${PLAIN}"
+    echo -e "${CYAN}正在连接 GitHub API...${PLAIN}"
     
     if [[ -z "$target" ]]; then
         target=$(curl -sL "https://api.github.com/repos/$REPO/releases/latest" | jq -r .tag_name)
@@ -98,10 +79,10 @@ update_core() {
     case $ARCH in
         x86_64|amd64) KW="amd64" ;;
         aarch64|arm64) KW="arm64" ;;
-        *) echo -e "${RED}不支持架构: $ARCH${PLAIN}"; return ;;
+        *) echo -e "${RED}不支持的架构: $ARCH${PLAIN}"; return ;;
     esac
 
-    echo -e "下载版本: ${GREEN}${target}${PLAIN}"
+    echo -e "下载核心: ${GREEN}${target}${PLAIN}"
     URL=$(curl -sL "https://api.github.com/repos/$REPO/releases/tags/$target" | jq -r '.assets[] | select(.browser_download_url | contains("linux") and contains("'"$KW"'") and contains(".zip")) | .browser_download_url' | head -n 1)
 
     wget -q --show-progress -O /tmp/anytls.zip "$URL"
@@ -115,20 +96,22 @@ update_core() {
         cp -f "$BIN" "$INSTALL_DIR/anytls-server"
         chmod +x "$INSTALL_DIR/anytls-server"
         echo "$target" > "$VERSION_FILE"
-        echo -e "${GREEN}核心已覆盖更新${PLAIN}"
+        echo -e "${GREEN}核心已安装/更新${PLAIN}"
+    else
+        echo -e "${RED}解压失败，未找到核心文件${PLAIN}"
     fi
     rm -rf /tmp/anytls.zip /tmp/anytls_tmp
 }
 
-# 修改配置 (强制重写)
+# 修改端口与域名 (无损修改)
 modify_config() {
-    [[ ! -f "$CONFIG_FILE" ]] && echo -e "${RED}未安装服务${PLAIN}" && return
+    [[ ! -f "$CONFIG_FILE" ]] && echo -e "${RED}服务未安装${PLAIN}" && return
     source "$CONFIG_FILE"
     
     clear
     echo -e "${BOLD}修改端口与域名${PLAIN}"
     echo -e "当前端口: ${GREEN}${PORT}${PLAIN}"
-    echo -e "当前SNI:  ${GREEN}${SNI}${PLAIN}"
+    echo -e "当前域名: ${GREEN}${SNI}${PLAIN}"
     echo "--------------------------"
     
     read -p "新端口 [回车保持 ${PORT}]: " NEW_PORT
@@ -137,14 +120,14 @@ modify_config() {
     [[ -z "$NEW_PORT" ]] && NEW_PORT="$PORT"
     [[ -z "$NEW_SNI" ]] && NEW_SNI="$SNI"
     
-    # 强制覆盖配置文件
+    # 1. 写入配置文件
     cat > "$CONFIG_FILE" << EOF
 PORT="${NEW_PORT}"
 PASSWORD="${PASSWORD}"
 SNI="${NEW_SNI}"
 EOF
 
-    # 强制覆盖 Service 文件
+    # 2. 写入 Systemd 服务文件 (更新启动参数)
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=AnyTLS-Go Server
@@ -163,13 +146,14 @@ LimitNOFILE=1000000
 WantedBy=multi-user.target
 EOF
 
+    # 3. 重启生效
     systemctl daemon-reload
     systemctl restart anytls
-    echo -e "${GREEN}配置已更新并重启!${PLAIN}"
+    echo -e "${GREEN}修改成功！服务已重启。${PLAIN}"
     sleep 2
 }
 
-# 首次安装
+# 首次安装流程
 first_install() {
     update_core
     
@@ -221,30 +205,29 @@ show_result() {
     IP=$(curl -s4m5 https://api.ipify.org)
     
     clear
-    echo -e "${GREEN}AnyTLS 正在运行${PLAIN}"
+    echo -e "${GREEN}AnyTLS 运行中${PLAIN}"
     echo -e "地址: ${IP}:${PORT}"
     echo -e "SNI:  ${SNI}"
     echo -e "链接: ${CYAN}anytls://${PASSWORD}@${IP}:${PORT}?sni=${SNI}&insecure=1#Node${PLAIN}"
     echo ""
-    read -p "按回车返回..."
+    read -p "按回车返回菜单..."
 }
 
-# --- 菜单 ---
+# --- 菜单系统 ---
 menu() {
     clear
-    # 每次进入菜单都执行清理和安装快捷键，确保覆盖
-    cleanup_legacy
-    install_shortcut
+    # 每次打开菜单都确保修复一次环境
+    fix_environment >/dev/null 2>&1
     
     VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "未安装")
     STATUS="${RED}停止${PLAIN}"
     systemctl is-active --quiet anytls && STATUS="${GREEN}运行中${PLAIN}"
     
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e "           ${BOLD}AnyTLS-Go 面板 V6.0${PLAIN}"
+    echo -e "           ${BOLD}AnyTLS-Go 面板 (Fix版)${PLAIN}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e " 状态: ${STATUS}      版本: ${YELLOW}${VER}${PLAIN}"
-    echo -e " 快捷键: ${GREEN}ats${PLAIN}"
+    echo -e " 快捷键: ${GREEN}anytls${PLAIN} (已修复环境冲突)"
     echo -e "----------------------------------------"
     echo -e " 1. 安装 / 重置"
     echo -e " 2. 查看配置"
@@ -269,8 +252,7 @@ menu() {
         8) systemctl restart anytls; menu ;;
         9) 
            systemctl stop anytls; systemctl disable anytls
-           rm -rf "$INSTALL_DIR" "$CONFIG_DIR" "$SHORTCUT_BIN"
-           cleanup_legacy
+           rm -rf "$INSTALL_DIR" "$CONFIG_DIR" "$TARGET_BIN"
            echo "已卸载"; exit 0 ;;
         0) exit 0 ;;
         *) menu ;;
@@ -279,9 +261,8 @@ menu() {
 
 # --- 运行入口 ---
 check_root
-# 只要脚本运行，首先执行清理，确保环境干净
-cleanup_legacy
-install_shortcut
+# 启动时先修复环境
+fix_environment
 
 if [[ "$1" == "install" ]]; then
     install_deps
