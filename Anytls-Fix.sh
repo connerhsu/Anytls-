@@ -15,7 +15,7 @@ BOLD='\033[1m'
 
 # --- 路径与链接配置 ---
 # ⚠️ 非常重要：请把下面的链接替换为你自己仓库中这个脚本的 Raw 地址！
-REPO_URL="https://raw.githubusercontent.com/您的用户名/您的仓库/main/Anytls-Fix.sh"
+REPO_URL="https://raw.githubusercontent.com/connerhsu/Anytls-/refs/heads/main/Anytls-Fix.sh"
 
 REPO="anytls/anytls-go"
 INSTALL_DIR="/opt/anytls"
