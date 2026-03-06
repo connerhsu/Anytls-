@@ -214,8 +214,8 @@ first_install() {
     read -p "密码 [默认 随机]: " PASSWORD
     [[ -z "$PASSWORD" ]] && PASSWORD=$(head /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 16)
     
-    read -p "伪装域名 [默认 mensura.cdn-apple.com]: " SNI
-    [[ -z "$SNI" ]] && SNI="mensura.cdn-apple.com"
+    read -p "伪装域名 [默认 www.cisco.com]: " SNI
+    [[ -z "$SNI" ]] && SNI="www.cisco.com"
     
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_FILE" << EOF
