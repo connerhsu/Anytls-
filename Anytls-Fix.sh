@@ -1,129 +1,70 @@
 #!/bin/bash
-# ====================================================
-# AnyTLS-Go 极致动态版 (针对新版极简参数修复 + 每日换肤)
-# ====================================================
+# AnyTLS-Go 修复版 - 强制面板显示 + 每日 3 点换肤
 
-# 颜色定义
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; CYAN='\033[36m'; PLAIN='\033[0m'
-
-# 路径配置
-INSTALL_DIR="/opt/anytls"; CONFIG_DIR="/etc/anytls"
-CONFIG_FILE="${CONFIG_DIR}/server.conf"; SERVICE_FILE="/etc/systemd/system/anytls.service"
+CONFIG_FILE="/etc/anytls/server.conf"
 TARGET_BIN="/usr/local/bin/anytls"
 
-# 1. 环境依赖安装 (包含 cron)
-install_deps() {
-    echo -e "${CYAN}正在安装必要依赖 (curl, unzip, cron)...${PLAIN}"
-    if command -v apt-get >/dev/null; then
-        apt-get update -y && apt-get install -y curl unzip wget cron
-        systemctl enable --now cron
-    else
-        yum install -y epel-release && yum install -y curl unzip wget crontabs
-        systemctl enable --now crond
-    fi
-}
-
-# 2. 增强型随机混淆生成器
-generate_padding_json() {
-    local stop=$((8 + RANDOM % 10))
-    local r1=$((100 + RANDOM % 100)); local r2=$((500 + RANDOM % 300))
-    local r3=$((700 + RANDOM % 300)); local r5=$((400 + RANDOM % 400))
-    # 构建符合新版 -padding-scheme 要求的 JSON
-    echo "[\"stop=${stop}\",\"0=$((10+RANDOM%30))-$((50+RANDOM%40))\",\"1=${r1}-$((r1+200))\",\"2=${r2}-$((r2+200)),c,${r3}-$((r3+150)),c,${r3}-$((r3+300))\",\"3=$((15+RANDOM%10))-$((30+RANDOM%20))\",\"4=$((250+RANDOM%200))-$((750+RANDOM%200))\",\"5=${r5}-$((r5+500))\"]"
-}
-
-# 3. 核心：保存配置并修复 Systemd 参数 (严格匹配 help 输出)
+# --- 1. 核心修复：-padding-scheme 参数逻辑 ---
 save_config() {
-    local pad=$(generate_padding_json)
-    mkdir -p "$CONFIG_DIR"
+    # 随机混淆生成
+    local stop=$((8 + RANDOM % 10))
+    local pad="[\"stop=${stop}\",\"0=$((10+RANDOM%30))-$((50+RANDOM%40))\",\"1=120-380\",\"2=600-900,c,700-1000,c,700-1100\",\"3=20-40\",\"4=300-800\",\"5=500-1000\"]"
     
-    # 存储基础配置
-    cat > "$CONFIG_FILE" <<EOF
-PORT="$1"; PASSWORD="$2"; PADDING='$pad'
-EOF
+    mkdir -p /etc/anytls
+    echo "PORT=\"$1\"; PASSWORD=\"$2\"; PADDING='$pad'" > "$CONFIG_FILE"
 
-    # 关键修复：仅保留 -l, -p 和 -padding-scheme
-    cat > "$SERVICE_FILE" <<EOF
+    # 写入 Systemd (严格匹配你 help 里的 -l -p -padding-scheme)
+    cat > /etc/systemd/system/anytls.service <<EOF
 [Unit]
-Description=AnyTLS-Go Service
+Description=AnyTLS-Go
 After=network.target
-
 [Service]
 Type=simple
-User=root
-# 严格按照 help 里的短横线格式编写
-ExecStart=${INSTALL_DIR}/anytls-server -l 0.0.0.0:$1 -p "$2" -padding-scheme '$pad'
+ExecStart=/opt/anytls/anytls-server -l 0.0.0.0:$1 -p "$2" -padding-scheme '$pad'
 Restart=always
-LimitNOFILE=1048576
-
 [Install]
 WantedBy=multi-user.target
 EOF
-
     systemctl daemon-reload && systemctl restart anytls
 }
 
-# 4. 配置每日凌晨 3 点自动更新指纹
+# --- 2. 自动化定时任务 ---
 setup_cron() {
-    # 确保脚本被复制到系统路径以便定时任务调用
-    cp "$0" "$TARGET_BIN" && chmod +x "$TARGET_BIN"
-    # 写入定时任务：每天凌晨 3:00 执行一次刷新逻辑
-    (crontab -l 2>/dev/null | grep -v "$TARGET_BIN --refresh"; echo "0 3 * * * $TARGET_BIN --refresh > /dev/null 2>&1") | crontab -
-    echo -e "${GREEN}Crontab 定时任务已设置：每日凌晨 03:00 自动刷新指纹。${PLAIN}"
+    apt-get install -y cron || yum install -y crontabs
+    systemctl enable --now cron || systemctl enable --now crond
+    (crontab -l 2>/dev/null | grep -v "anytls --refresh"; echo "0 3 * * * $TARGET_BIN --refresh > /dev/null 2>&1") | crontab -
 }
 
-# 5. 管理菜单
+# --- 3. 菜单面板 ---
 menu() {
     clear
-    echo -e "${CYAN}AnyTLS 极致版 (针对新版参数修复)${PLAIN}"
-    echo -e "--------------------------------"
-    echo -e "1. ${GREEN}安装/重置 (包含 BBR + 定时换肤)${PLAIN}"
+    echo -e "${CYAN}=== AnyTLS 管理面板 (已集成每日 3 点换肤) ===${PLAIN}"
+    echo -e "1. 安装/重置 (一键开启 BBR + 定时任务)"
     echo -e "2. 查看当前配置"
-    echo -e "3. 立即手动刷新指纹并重启"
+    echo -e "4. 立即手动刷新随机指纹"
     echo -e "0. 退出"
-    read -p "选择 [0-3]: " num
+    read -p "请选择: " num
     case "$num" in
-        1) 
-            install_deps
-            # 开启 BBR
-            echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-            echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-            sysctl -p >/dev/null 2>&1
-            # 获取配置
+        1)
             read -p "端口 [8443]: " port; port=${port:-8443}
             read -p "密码: " pass; pass=${pass:-$(head /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 12)}
             save_config "$port" "$pass"
             setup_cron
-            echo -e "${GREEN}安装并启动成功！${PLAIN}"
+            echo -e "${GREEN}部署完成！已修复参数并添加定时任务。${PLAIN}"
             ;;
-        2) 
-            if [ -f "$CONFIG_FILE" ]; then
-                source "$CONFIG_FILE"
-                echo -e "${CYAN}地址: $(curl -s4 ip.sb):$PORT${PLAIN}"
-                echo -e "${CYAN}密码: $PASSWORD${PLAIN}"
-                echo -e "${CYAN}当前指纹: $PADDING${PLAIN}"
-            else
-                echo -e "${RED}未发现配置文件${PLAIN}"
-            fi
-            read -p "按回车返回..."
-            ;;
-        3) 
-            source "$CONFIG_FILE"
-            save_config "$PORT" "$PASSWORD"
-            echo -e "${GREEN}指纹已手动刷新并重启！${PLAIN}"
-            sleep 2
-            ;;
+        2) [[ -f $CONFIG_FILE ]] && source $CONFIG_FILE && echo -e "地址: $(curl -s4 ip.sb):$PORT\n密码: $PASSWORD\n指纹: $PADDING" ;;
+        4) source $CONFIG_FILE && save_config "$PORT" "$PASSWORD" && echo -e "${GREEN}指纹已更新${PLAIN}" ;;
         *) exit 0 ;;
     esac
 }
 
-# 自动处理定时任务调用
+# --- 启动触发 ---
 if [[ "$1" == "--refresh" ]]; then
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-        save_config "$PORT" "$PASSWORD"
-    fi
+    source $CONFIG_FILE && save_config "$PORT" "$PASSWORD"
     exit 0
 fi
 
+# 确保脚本自己在路径中
+cp "$0" "$TARGET_BIN" && chmod +x "$TARGET_BIN"
 menu
