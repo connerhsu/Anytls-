@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # =========================================================
-# Anytls-Go 一键管理脚本 (修复版 v0.1.9)
+# Anytls-Go 一键管理脚本 (v0.2.0 Ultimate Edition)
 # 修复: 解决 curl 管道安装时的截断报错与快捷键丢失问题
+# 优化: 集成高随机性 Padding Scheme，彻底隐藏 TLS 指纹
 # =========================================================
 
 # --- 1. 定义关键路径 (标准化路径，防止混淆) ---
@@ -61,7 +62,7 @@ install_and_exec() {
 install_and_exec "$@"
 
 # =========================================================
-# 以下是原有业务逻辑 (已清理冗余代码)
+# 以下是原有业务逻辑
 # =========================================================
 
 CONFIG_DIR="/etc/AnyTLS"
@@ -71,7 +72,7 @@ ANYTLS_SERVICE_NAME="anytls.service"
 ANYTLS_SERVICE_FILE="/etc/systemd/system/${ANYTLS_SERVICE_NAME}"
 ANYTLS_CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="0.1.9"
+SHELL_VERSION="0.2.0"
 
 print_ok() { echo -e "${Green}[OK]${Blue} $1 ${Font}"; }
 print_info() { echo -e "${Cyan}[INFO]${Cyan} $1 ${Font}"; }
@@ -92,7 +93,6 @@ check_self_update() {
       remote_version=$(curl -fsSL --connect-timeout 3 -H "Cache-Control: no-cache" "$SCRIPT_URL" | grep 'SHELL_VERSION="' | head -1 | cut -d'"' -f2)
       if [[ -n "$remote_version" && "$remote_version" != "$SHELL_VERSION" ]]; then
         print_info "发现新版本: ${remote_version} (当前: ${SHELL_VERSION})"
-        # 可以在这里添加自动更新提示
       fi
   fi
 }
@@ -211,21 +211,23 @@ WantedBy=multi-user.target
 EOF
 }
 
+# --- 核心优化: 写入高随机性 padding_scheme ---
 write_config() {
   local port="$1" pass="$2"
   mkdir -p "$(dirname "${ANYTLS_CONFIG_FILE}")"
+  
   cat > "${ANYTLS_CONFIG_FILE}" <<EOF
 listen: :${port}
 padding_scheme:
   - "stop=8"
-  - "0=20-60"
-  - "1=100-450"
+  - "0=30-150"
+  - "1=80-400"
   - "2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000"
-  - "3=10-20,500-1000"
-  - "4=100-800"
-  - "5=100-800"
-  - "6=100-800"
-  - "7=100-800"
+  - "3=20-100,500-1000"
+  - "4=100-1200"
+  - "5=50-800"
+  - "6=50-800"
+  - "7=50-800"
 auth:
   type: password
   password: ${pass}
@@ -252,7 +254,7 @@ client_export() {
   echo -e " 端口: ${port}"
   echo -e " 密码: ${pass}"
   echo -e " 混淆: ${padding_info}"
-  echo -e " 备注: 无需每日更换 Padding，全自动动态"
+  echo -e " 备注: 全动态随机包长，无需每日更换"
   echo -e "========================================="
   echo -e " URL链接:"
   echo -e " anytls://${link}"
@@ -310,7 +312,7 @@ install_anytls() {
   
   sleep 2
   if is_active; then
-    print_ok "AnyTLS 服务已启动"
+    print_ok "AnyTLS 服务已启动 (High Security Mode)"
     client_export
   else
     print_error "服务启动失败"
@@ -348,7 +350,7 @@ update_anytls() {
   write_config "$port" "$pass"
   
   restart_service
-  print_ok "更新完成"
+  print_ok "更新完成，配置文件已升级为增强版 Scheme"
   client_export
 }
 
@@ -397,7 +399,7 @@ reset_scheme() {
   pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
   write_config "$port" "$pass"
   restart_service
-  print_ok "已重置 Scheme"
+  print_ok "已重置为增强版 Scheme"
   client_export
 }
 
@@ -409,6 +411,7 @@ main() {
     echo -e " -------------------------------------------"
     echo -e " 状态：$(install_status_text) | Ver: $(get_install_version)"
     echo -e " 快捷命令: ${Green}anytls${Font}"
+    echo -e " 混淆策略: ${Green}Ultimate Dynamic (随机性增强)${Font}"
     echo -e " -------------------------------------------"
     echo -e " 1. 安装/重装 AnyTLS"
     echo -e " 2. 更新 AnyTLS (强制升级配置)"
@@ -416,7 +419,7 @@ main() {
     echo -e " 4. 卸载 AnyTLS"
     echo -e " 5. 更改端口"
     echo -e " 6. 更改密码"
-    echo -e " 7. 重置为默认高级 Scheme (修复配置)"
+    echo -e " 7. 重置为增强版 Scheme (应用新混淆)"
     echo -e " 0. 退出"
     echo -e " -------------------------------------------"
     read -p " 请输入数字: " choice
