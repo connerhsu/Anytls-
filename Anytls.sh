@@ -1,292 +1,466 @@
-#!/bin/bash
-# ====================================================
-# AnyTLS-Go 动态混淆随机版 (修复版)
-# 修复内容: 
-# 1. 修复 padding-scheme 参数传入方式 (改为文件路径)，解决启动失败问题
-# 2. 修复菜单选项 5 显示乱码问题 (echo -p -> echo -e)
-# ====================================================
+#!/usr/bin/env bash
+# AnyTLS一键管理脚本：安装/更新/查看/更改端口/更改密码/删除/快捷指令/Padding
+# 适配 Debian/Ubuntu (apt) 与 CentOS/RHEL/Alma/Rocky
+# 兼容 arm64 和 amd64 两种系统架构
 
-# --- 颜色定义 ---
-RED='\033[31m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-BLUE='\033[34m'
-CYAN='\033[36m'
-PLAIN='\033[0m'
-BOLD='\033[1m'
+set -euo pipefail
 
-# --- 路径与链接配置 ---
-# 注意：如果你的脚本仓库地址变了，请在这里更新
-REPO_URL="https://raw.githubusercontent.com/connerhsu/Anytls-/refs/heads/main/Anytls-Fix.sh"
-INSTALL_DIR="/opt/anytls"
-CONFIG_DIR="/etc/anytls"
-CONFIG_FILE="${CONFIG_DIR}/server.conf"
-PADDING_FILE="${CONFIG_DIR}/padding.json" # 新增：独立的 Padding 配置文件
-VERSION_FILE="${INSTALL_DIR}/version"
-SERVICE_FILE="/etc/systemd/system/anytls.service"
-TARGET_BIN="/usr/local/bin/anytls"
+CONFIG_DIR="/etc/AnyTLS" # 配置目录
+ANYTLS_SNAP_DIR="/tmp/anytls_install_$$" # 临时目录
+ANYTLS_SERVER="${CONFIG_DIR}/server" # 服务端文件
+ANYTLS_SERVICE_NAME="anytls.service" # 服务
+ANYTLS_SERVICE_FILE="/etc/systemd/system/${ANYTLS_SERVICE_NAME}" # 服务目录
+ANYTLS_CONFIG_FILE="${CONFIG_DIR}/config.yaml" # 主配置文件
+TZ_DEFAULT="Asia/Shanghai" # 默认时区
+SHELL_VERSION="0.1.2" # 脚本版本
+AT_ALIASES="AT_GeorgianaBlake" # AnyTLS别名
+SHORTCUT_FILE="/usr/bin/anytls" # 快捷指令路径
 
-# --- 0. 核心：随机数据包填充策略生成器 ---
-generate_padding_json() {
-    local stop=$((6 + RANDOM % 8)) # 停止位在 6-13 之间随机
-    local r1=$((80 + RANDOM % 150))
-    local r2=$((300 + RANDOM % 400))
-    local r3=$((500 + RANDOM % 500))
+# 字体颜色配置
+Font="\033[0m"
+Red="\033[31m"
+Green="\033[32m"
+Yellow="\033[33m"
+Blue="\033[34m"
+Cyan="\033[36m"
+RedBG="\033[41m"
+OK="${Green}[OK]${Font}"
+ERROR="${Red}[ERROR]${Font}"
+WARN="${Yellow}[WARN]${Font}"
+INFO="${Cyan}[INFO]${Font}"
 
-    cat <<EOF
-[
-  "stop=${stop}",
-  "0=$((20 + RANDOM % 20))-$((40 + RANDOM % 20))",
-  "1=${r1}-$((r1 + 200))",
-  "2=${r2}-$((r2 + 300)),c,${r3}-$((r3 + 200)),c,${r3}-$((r3 + 300))",
-  "3=$((10 + RANDOM % 10))-$((20 + RANDOM % 10))",
-  "4=$((200 + RANDOM % 300))-$((600 + RANDOM % 200))",
-  "5=$((400 + RANDOM % 200))-$((800 + RANDOM % 200))"
-]
-EOF
+print_ok() { echo -e "${OK}${Blue} $1 ${Font}"; }
+print_info() { echo -e "${INFO}${Cyan} $1 ${Font}"; }
+print_error() { echo -e "${ERROR} ${RedBG} $1 ${Font}"; }
+
+judge() {
+  if [[ 0 -eq $? ]]; then
+    print_ok "$1 完成"
+    sleep 1
+  else
+    print_error "$1 失败"
+    exit 1
+  fi
 }
 
-# --- 1. 脚本自混淆 (改变脚本自身的 MD5) ---
-add_script_padding() {
-    local rand_str=$(head /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c $((16 + RANDOM % 48)))
-    # 避免无限追加，只在文件末尾没有 Fingerprint 时追加（可选优化，此处保持原逻辑简单追加）
-    echo -e "\n# Fingerprint: ${rand_str}" >> "$1"
+trap 'echo -e "\n${WARN} 已中断"; exit 1' INT
+
+ensure_root() {
+  if [[ $EUID -ne 0 ]]; then
+    clear
+    echo "Error: 必须使用 root 运行本脚本!" 1>&2
+    exit 1
+  fi
 }
 
-# --- 2. 基础检查与自更新逻辑 ---
-check_root() {
-    [[ $EUID -ne 0 ]] && echo -e "${RED}必须使用 root 权限运行！${PLAIN}" && exit 1
+get_arch() {
+  local arch_raw
+  arch_raw=$(uname -m)
+  case "$arch_raw" in
+    x86_64 | amd64) echo "amd64" ;;
+    aarch64 | arm64) echo "arm64" ;;
+    *)
+      print_error "不支持的系统架构 ($arch_raw)" >&2
+      return 1
+      ;;
+  esac
 }
 
-install_global() {
-    if [[ "$0" != "$TARGET_BIN" ]]; then
-        echo -e "${CYAN}正在初始化 AnyTLS 环境...${PLAIN}"
-        if command -v wget >/dev/null; then wget -qO "$TARGET_BIN" "$REPO_URL"; else curl -sSL -o "$TARGET_BIN" "$REPO_URL"; fi
-        # 赋予执行权限
-        chmod +x "$TARGET_BIN"
-        add_script_padding "$TARGET_BIN"
-        exec bash "$TARGET_BIN" "$@" < /dev/tty
-    else
-        # 每次运行本地 anytls，都尝试同步远端并重新随机化本地脚本
-        local tmp_sh="/tmp/anytls_rand.sh"
-        if curl -sSL -o "$tmp_sh" "$REPO_URL" || wget -qO "$tmp_sh" "$REPO_URL"; then
-            # 只有下载成功才覆盖
-            if [[ -s "$tmp_sh" ]]; then
-                cat "$tmp_sh" > "$TARGET_BIN"
-                add_script_padding "$TARGET_BIN"
-                chmod +x "$TARGET_BIN"
-            fi
-            rm -f "$tmp_sh"
-        fi
+os_install() {
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y
+    apt-get install -y ca-certificates unzip curl
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf update -y
+    dnf install -y ca-certificates unzip curl
+  elif command -v yum >/dev/null 2>&1; then
+    yum update -y
+    yum install -y ca-certificates unzip curl
+  else
+    echo "未识别的包管理器，请手动安装 ca-certificates、unzip、curl 后重试"
+    exit 1
+  fi
+}
+
+pause() { read -rp "按回车返回菜单..." _; }
+quit() { exit 0; }
+hr() { printf '%*s\n' 40 '' | tr ' ' '='; }
+
+# 关闭各类防火墙
+close_wall() {
+  for svc in firewalld nftables ufw; do
+    if systemctl list-unit-files | grep -q "^${svc}.service"; then
+      if systemctl is-active --quiet "$svc"; then
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl disable "$svc" 2>/dev/null || true
+        print_ok "已关闭并禁用防火墙: $svc"
+      fi
     fi
+  done
 }
 
-install_deps() {
-    local deps=("curl" "unzip" "net-tools" "wget" "tar")
-    for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &>/dev/null; then
-            echo -e "正在安装依赖: $dep"
-            if [ -x "$(command -v apt-get)" ]; then
-                apt-get update -y >/dev/null 2>&1
-                apt-get install -y "$dep" >/dev/null 2>&1
-            elif [ -x "$(command -v yum)" ]; then
-                yum install -y "$dep" >/dev/null 2>&1
-            fi
-        fi
-    done
-}
-
-# --- 3. 功能模块 ---
-update_core() {
-    local target=$1
-    echo -e "${CYAN}正在获取最新核心...${PLAIN}"
-    local repo="anytls/anytls-go"
-    
-    # 获取最新 Tag
-    if [[ -z "$target" ]]; then
-        target=$(curl -sL "https://api.github.com/repos/$repo/releases/latest" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | sed 's/"tag_name": "//;s/"//')
-    fi
-    
-    if [[ -z "$target" ]]; then
-        echo -e "${RED}获取版本信息失败，请检查网络连接或 GitHub API 限制${PLAIN}"
-        return
-    fi
-
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64|amd64) KW="amd64" ;;
-        aarch64|arm64) KW="arm64" ;;
-        *) echo "不支持的架构: $ARCH"; return ;;
+urlencode() {
+  local s="$1"
+  local i c
+  for (( i=0; i<${#s}; i++ )); do
+    c=${s:$i:1}
+    case "$c" in
+      [a-zA-Z0-9.~_-]) printf '%s' "$c" ;;
+      *) printf '%%%02X' "'$c" ;;
     esac
-
-    # 获取下载链接
-    URL=$(curl -sL "https://api.github.com/repos/$repo/releases/tags/$target" | grep -o '"browser_download_url": *"[^"]*"' | grep -i "linux" | grep -i "$KW" | grep -i "\.zip" | head -n 1 | sed 's/"browser_download_url": "//;s/"//')
-
-    if [[ -z "$URL" ]]; then
-        echo -e "${RED}未找到适配当前架构的下载链接${PLAIN}"
-        return
-    fi
-
-    echo -e "正在下载版本: ${target}..."
-    wget -qO /tmp/anytls.zip "$URL"
-    
-    if [[ ! -s /tmp/anytls.zip ]]; then
-        echo -e "${RED}下载失败${PLAIN}"
-        return
-    fi
-
-    mkdir -p /tmp/anytls_tmp && unzip -qo /tmp/anytls.zip -d /tmp/anytls_tmp
-    BIN=$(find /tmp/anytls_tmp -type f -name "anytls-server" | head -n 1)
-    
-    if [[ -n "$BIN" ]]; then
-        systemctl stop anytls 2>/dev/null
-        mkdir -p "$INSTALL_DIR"
-        cp -f "$BIN" "$INSTALL_DIR/anytls-server"
-        chmod +x "$INSTALL_DIR/anytls-server"
-        echo "$target" > "$VERSION_FILE"
-        echo -e "${GREEN}核心更新成功${PLAIN}"
-    else
-        echo -e "${RED}解压失败或未找到二进制文件${PLAIN}"
-    fi
-    rm -rf /tmp/anytls.zip /tmp/anytls_tmp
+  done
 }
 
-write_config() {
-    # 1. 生成 Padding JSON
-    local padding_val=$(generate_padding_json | tr -d '\n' | sed 's/ //g')
-    
-    # 确保配置目录存在
-    mkdir -p "$CONFIG_DIR"
+random_port() { shuf -i 2000-65000 -n 1; }
+gen_password() { cat /proc/sys/kernel/random/uuid; }
+gen_padding() { shuf -i 100-1500 -n 1; } # 生成随机padding
 
-    # 2. 【关键修复】将 JSON 写入到单独的文件中
-    echo "${padding_val}" > "${PADDING_FILE}"
+valid_port() {
+  local p="${1:-}"
+  [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 65535 ))
+}
 
-    # 3. 写入主配置文件 (供脚本读取显示用)
-    cat > "$CONFIG_FILE" << EOF
-PORT="${1}"
-PASSWORD="${2}"
-SNI="${3}"
-# 注意: 实际运行使用的是 ${PADDING_FILE}
-PADDING_Preview='${padding_val}'
-EOF
+is_port_used() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -tuln | awk '{print $5}' | grep -Eq "[:.]${port}([[:space:]]|$)"
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -tuln 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$"
+  else
+    return 1
+  fi
+}
 
-    # 4. 【关键修复】Systemd 中指向文件路径，而不是传递 Raw String
-    # 移除了单引号包裹，直接使用绝对路径
-    cat > "$SERVICE_FILE" << EOF
+read_port_interactive() {
+  local input
+  while true; do
+    read -t 15 -p "回车或等待15秒为随机端口，或者自定义端口请输入(1-65535)：" input || true
+    if [[ -z "${input:-}" ]]; then
+      input=$(random_port)
+    fi
+    if ! valid_port "$input"; then
+      echo "端口不合法：$input"
+      continue
+    fi
+    if is_port_used "$input"; then
+      echo "端口 $input 已被占用"
+      continue
+    fi
+    echo "$input"
+    break
+  done
+}
+
+get_ip() {
+  local ip4 ip6
+  ip4=$(curl -s -4 http://www.cloudflare.com/cdn-cgi/trace | awk -F= '/^ip=/{print $2}')
+  [[ -n "${ip4}" ]] && echo "${ip4}" && return
+  ip6=$(curl -s -6 http://www.cloudflare.com/cdn-cgi/trace | awk -F= '/^ip=/{print $2}')
+  [[ -n "${ip6}" ]] && echo "${ip6}" && return
+  curl -s https://api.ipify.org || true
+}
+
+get_latest_version() {
+  local version
+  version=$(curl -s https://api.github.com/repos/anytls/anytls-go/releases/latest \
+    | grep '"tag_name":' \
+    | sed -E 's/.*"([^"]+)".*/\1/')
+  if [[ -z "$version" ]]; then
+    print_error "无法获取AnyTLS最新版本号" >&2
+    return 1
+  fi
+  echo "$version"
+}
+
+get_install_version() {
+  if [[ -f "$ANYTLS_SERVICE_FILE" ]]; then
+    grep '^X-AT-Version=' "$ANYTLS_SERVICE_FILE" | sed -E 's/^X-AT-Version=//'
+  else
+    echo "unknown"
+  fi
+}
+
+# 创建快捷指令 anytls
+create_shortcut() {
+  if [[ -f "$0" ]]; then
+      cp -f "$0" "$SHORTCUT_FILE"
+      chmod +x "$SHORTCUT_FILE"
+      print_ok "已创建全局快捷指令: anytls (输入 anytls 即可打开面板)"
+  fi
+}
+
+write_systemd() {
+  local version="$1" port="$2" pass="$3"
+  [[ -z "$version" ]] && version="$(get_install_version)"
+  
+  cat > "$ANYTLS_SERVICE_FILE" << EOF
 [Unit]
-Description=AnyTLS-Go Server
-After=network.target
+Description=AnyTLS Server Service
+Documentation=https://github.com/anytls/anytls-go
+After=network.target network-online.target
+Wants=network-online.target
+X-AT-Version=${version}
 
 [Service]
 Type=simple
 User=root
-ExecStart=${INSTALL_DIR}/anytls-server -l 0.0.0.0:${1} -p "${2}" -padding-scheme "${PADDING_FILE}"
-Restart=always
-RestartSec=3
-LimitNOFILE=1000000
+Environment=TZ=${TZ_DEFAULT}
+ExecStart="${ANYTLS_SERVER}" -l 0.0.0.0:${port} -p "${pass}"
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
+}
 
-    systemctl daemon-reload
-    systemctl restart anytls
-    
-    # 检查启动状态
-    sleep 2
-    if systemctl is-active --quiet anytls; then
-        echo -e "${GREEN}服务启动成功！${PLAIN}"
+write_config() {
+  # 参数：端口 密码 Padding
+  local port="$1" pass="$2" padding="$3"
+  mkdir -p "$(dirname "${ANYTLS_CONFIG_FILE}")"
+  cat > "${ANYTLS_CONFIG_FILE}" <<EOF
+listen: :${port}
+padding: ${padding}
+auth:
+  type: password
+  password: ${pass}
+EOF
+}
+
+client_export() {
+  if [[ ! -f "${ANYTLS_CONFIG_FILE}" ]]; then
+    print_error "未找到 ${ANYTLS_CONFIG_FILE}"
+    return 1
+  fi
+  local port pass ip link padding
+  port=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*.*:([0-9]+)[[:space:]]*$/\1/p' "${ANYTLS_CONFIG_FILE}")
+  pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
+  padding=$(sed -nE 's/^[[:space:]]*padding:[[:space:]]*([0-9]+).*$/\1/p' "${ANYTLS_CONFIG_FILE}")
+  
+  ip=$(get_ip)
+  local alias_enc
+  alias_enc=$(urlencode "${AT_ALIASES}")
+  # 标准AnyTLS链接格式通常不包含padding，如果客户端支持，需根据特定客户端协议添加
+  link="${pass}@${ip}:${port}/?insecure=1#${alias_enc}"
+
+  echo -e "=========== AnyTLS 配置参数 ==========="
+  echo -e " 地址: ${ip}"
+  echo -e " 端口: ${port}"
+  echo -e " 密码: ${pass}"
+  echo -e " Padding: ${padding} (随机混淆长度)"
+  echo -e " 备注: 请确保客户端允许不安全证书"
+  echo -e "========================================="
+  echo -e " URL链接:"
+  echo -e " anytls://${link}"
+  echo -e "========================================="
+}
+
+start_service() { systemctl start "${ANYTLS_SERVICE_NAME}"; sleep 1; status_service; }
+stop_service() { systemctl stop "${ANYTLS_SERVICE_NAME}"; }
+status_service() { systemctl status "${ANYTLS_SERVICE_NAME}" --no-pager; }
+log_service() { journalctl -u "${ANYTLS_SERVICE_NAME}" -f "$@"; }
+
+binary_exists() { [[ -x "${ANYTLS_SERVER}" ]]; }
+service_file_exists() { [[ -f "${ANYTLS_SERVICE_FILE}" ]]; }
+is_installed() { binary_exists || service_file_exists; }
+is_active() { systemctl is-active "${ANYTLS_SERVICE_NAME}" >/dev/null 2>&1; }
+
+install_status_text() {
+  if is_installed; then
+    if is_active; then
+      echo -e "${Green}已安装（运行中）${Font}"
     else
-        echo -e "${RED}服务启动失败！正在查看日志...${PLAIN}"
-        journalctl -u anytls -n 10 --no-pager
+      echo -e "${Yellow}已安装（已停止）${Font}"
     fi
+  else
+    echo -e "${Red}未安装${Font}"
+  fi
 }
 
-first_install() {
-    install_deps
-    # 只有当二进制文件不存在时才强制更新/下载，或者用户手动选更新
-    if [[ ! -f "$INSTALL_DIR/anytls-server" ]]; then
-        update_core
-    fi
-    
+restart_service() {
+  systemctl daemon-reload
+  systemctl enable "${ANYTLS_SERVICE_NAME}" >/dev/null 2>&1
+  systemctl restart "${ANYTLS_SERVICE_NAME}"
+}
+
+install_anytls() {
+  mkdir -p "$CONFIG_DIR"
+  os_install
+  close_wall
+  
+  ARCH=$(get_arch) || exit 1
+  LATEST=$(get_latest_version) || exit 1
+  
+  print_info "正在下载 AnyTLS ${LATEST} (${ARCH})..."
+  AT_URL="https://github.com/anytls/anytls-go/releases/download/${LATEST}/anytls_${LATEST#v}_linux_${ARCH}.zip"
+  
+  mkdir -p "$ANYTLS_SNAP_DIR"
+  curl -L -o "${ANYTLS_SNAP_DIR}/anytls.zip" "$AT_URL" || { print_error "下载失败"; exit 1; }
+  
+  unzip -o "${ANYTLS_SNAP_DIR}/anytls.zip" -d "$ANYTLS_SNAP_DIR"
+  mv "${ANYTLS_SNAP_DIR}/anytls-server" "$ANYTLS_SERVER"
+  chmod +x "$ANYTLS_SERVER"
+  rm -rf "${ANYTLS_SNAP_DIR}"
+
+  local port pass padding
+  port=$(read_port_interactive)
+  pass=$(gen_password)
+  padding=$(gen_padding)
+
+  write_systemd "$LATEST" "$port" "$pass"
+  write_config "$port" "$pass" "$padding"
+  create_shortcut
+
+  restart_service
+  
+  sleep 2
+  if is_active; then
+    print_ok "AnyTLS 服务已启动"
+    client_export
+  else
+    print_error "服务启动失败"
+    log_service -n 20
+  fi
+}
+
+update_anytls() {
+  ! is_installed && print_error "未安装 AnyTLS" && return 1
+  
+  ARCH=$(get_arch) || exit 1
+  LATEST=$(get_latest_version) || exit 1
+  
+  print_info "正在更新至 ${LATEST}..."
+  # 修复了原脚本这里写成 darwin 的bug，改为 linux
+  AT_URL="https://github.com/anytls/anytls-go/releases/download/${LATEST}/anytls_${LATEST#v}_linux_${ARCH}.zip"
+  
+  mkdir -p "$ANYTLS_SNAP_DIR"
+  curl -L -o "${ANYTLS_SNAP_DIR}/anytls.zip" "$AT_URL" || { print_error "下载失败"; exit 1; }
+  
+  systemctl stop "${ANYTLS_SERVICE_NAME}"
+  
+  unzip -o "${ANYTLS_SNAP_DIR}/anytls.zip" -d "$ANYTLS_SNAP_DIR"
+  mv "${ANYTLS_SNAP_DIR}/anytls-server" "$ANYTLS_SERVER"
+  chmod +x "$ANYTLS_SERVER"
+  rm -rf "${ANYTLS_SNAP_DIR}"
+
+  # 读取旧配置
+  local port pass padding
+  port=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*.*:([0-9]+)[[:space:]]*$/\1/p' "${ANYTLS_CONFIG_FILE}")
+  pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
+  padding=$(sed -nE 's/^[[:space:]]*padding:[[:space:]]*([0-9]+).*$/\1/p' "${ANYTLS_CONFIG_FILE}")
+
+  [[ -z "$port" ]] && port=$(random_port)
+  [[ -z "$pass" ]] && pass=$(gen_password)
+  [[ -z "$padding" ]] && padding=$(gen_padding) # 如果旧配置没有padding，则生成一个新的
+
+  write_systemd "$LATEST" "$port" "$pass"
+  write_config "$port" "$pass" "$padding"
+  create_shortcut
+  
+  restart_service
+  print_ok "更新完成"
+  client_export
+}
+
+uninstall_anytls() {
+  ! is_installed && print_error "未安装 AnyTLS" && return 1
+  read -p "确认卸载？(y/N): " ans
+  [[ "${ans:-N}" != [yY] ]] && echo "已取消" && return
+  
+  systemctl stop "${ANYTLS_SERVICE_NAME}"
+  systemctl disable "${ANYTLS_SERVICE_NAME}"
+  rm -f "${ANYTLS_SERVICE_FILE}"
+  rm -f "${SHORTCUT_FILE}"
+  systemctl daemon-reload
+  rm -rf "${CONFIG_DIR}"
+  print_ok "卸载完成"
+}
+
+set_port() {
+  ! is_installed && print_error "未安装" && return 1
+  local new_port pass padding
+  new_port=$(read_port_interactive)
+  pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
+  padding=$(sed -nE 's/^[[:space:]]*padding:[[:space:]]*([0-9]+).*$/\1/p' "${ANYTLS_CONFIG_FILE}")
+  [[ -z "$padding" ]] && padding=$(gen_padding)
+  
+  write_systemd "" "$new_port" "$pass"
+  write_config "$new_port" "$pass" "$padding"
+  restart_service
+  print_ok "端口已更改为: $new_port"
+  client_export
+}
+
+set_password() {
+  ! is_installed && print_error "未安装" && return 1
+  local new_pass port padding
+  new_pass=$(gen_password)
+  port=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*.*:([0-9]+)[[:space:]]*$/\1/p' "${ANYTLS_CONFIG_FILE}")
+  padding=$(sed -nE 's/^[[:space:]]*padding:[[:space:]]*([0-9]+).*$/\1/p' "${ANYTLS_CONFIG_FILE}")
+  [[ -z "$padding" ]] && padding=$(gen_padding)
+  
+  write_systemd "" "$port" "$new_pass"
+  write_config "$port" "$new_pass" "$padding"
+  restart_service
+  print_ok "密码已刷新"
+  client_export
+}
+
+set_padding() {
+  ! is_installed && print_error "未安装" && return 1
+  local new_padding port pass
+  new_padding=$(gen_padding)
+  port=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*.*:([0-9]+)[[:space:]]*$/\1/p' "${ANYTLS_CONFIG_FILE}")
+  pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
+  
+  write_config "$port" "$pass" "$new_padding"
+  restart_service
+  print_ok "Padding 已刷新为: $new_padding"
+  client_export
+}
+
+view_config() {
+  ! is_installed && print_error "未安装" && return 1
+  client_export
+}
+
+main() {
+  while true; do
     clear
-    echo -e "${BOLD}=== 初始化配置 (Padding 已自动随机化) ===${PLAIN}"
-    read -p "端口 [8443]: " PORT
-    PORT=${PORT:-8443}
-    read -p "密码 [随机]: " PASSWORD
-    PASSWORD=${PASSWORD:-$(head /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 16)}
-    read -p "域名 [www.cisco.com]: " SNI
-    SNI=${SNI:-"www.cisco.com"}
-    
-    mkdir -p "$CONFIG_DIR"
-    write_config "$PORT" "$PASSWORD" "$SNI"
-    show_result
+    hr
+    echo -e " AnyTLS 一键脚本 (Enhanced)"
+    echo -e " 快捷命令: anytls"
+    echo -e " 版本: ${SHELL_VERSION}"
+    echo -e " 状态：$(install_status_text) | Ver: $(get_install_version)"
+    hr
+    echo -e "${Cyan}1. 安装/重装 AnyTLS${Font}"
+    echo -e "${Cyan}2. 更新 AnyTLS${Font}"
+    echo -e "${Cyan}3. 查看配置${Font}"
+    echo -e "${Cyan}4. 卸载 AnyTLS${Font}"
+    echo -e "${Cyan}5. 更改端口${Font}"
+    echo -e "${Cyan}6. 更改密码${Font}"
+    echo -e "${Cyan}7. 更改随机Padding (混淆)${Font}"
+    echo -e "${Cyan}0. 退出${Font}"
+    hr
+    read -p "请输入数字: " choice
+    case "${choice}" in
+      1) install_anytls; pause ;;
+      2) update_anytls; pause ;;
+      3) view_config; pause ;;
+      4) uninstall_anytls; pause ;;
+      5) set_port; pause ;;
+      6) set_password; pause ;;
+      7) set_padding; pause ;;
+      0) exit 0 ;;
+      *) echo "无效选项"; pause ;;
+    esac
+  done
 }
 
-show_result() {
-    # 容错处理：如果配置文件不存在
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        echo -e "${RED}配置文件不存在，请先安装。${PLAIN}"
-        return
-    fi
-    
-    source "$CONFIG_FILE"
-    
-    # 获取公网 IP
-    IP=$(curl -s4m5 https://api.ipify.org || curl -s4m5 https://ifconfig.me || echo "127.0.0.1")
-    
-    # 读取最新的 Padding 文件内容用于显示
-    local current_padding=$(cat "$PADDING_FILE" 2>/dev/null)
-
-    clear
-    echo -e "${GREEN}=== AnyTLS 节点信息 (已应用动态混淆) ===${PLAIN}"
-    echo -e "地址: ${CYAN}${IP}:${PORT}${PLAIN}"
-    echo -e "密码: ${CYAN}${PASSWORD}${PLAIN}"
-    echo -e "SNI:  ${CYAN}${SNI}${PLAIN}"
-    echo -e "\n${YELLOW}当前 Padding 策略 (来自 ${PADDING_FILE}):${PLAIN}"
-    echo -e "${BLUE}${current_padding}${PLAIN}"
-    echo -e "\n${YELLOW}分享链接:${PLAIN}"
-    # 这里构造链接
-    echo -e "${CYAN}anytls://${PASSWORD}@${IP}:${PORT}?sni=${SNI}&insecure=1#Random_Node${PLAIN}\n"
-    read -p "按回车返回菜单..."
-}
-
-# --- 4. 菜单系统 ---
-menu() {
-    while true; do
-        clear
-        VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "未安装")
-        STATUS="${RED}● 停止${PLAIN}"
-        if systemctl is-active --quiet anytls; then
-            STATUS="${GREEN}● 运行中${PLAIN}"
-        fi
-        
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-        echo -e "           AnyTLS-Go 动态混淆面板"
-        echo -e " 状态: ${STATUS}      版本: ${YELLOW}${VER}${PLAIN}"
-        echo -e " 特性: 每次配置/安装都会重新生成随机 Padding"
-        echo -e "----------------------------------------"
-        echo -e " ${GREEN}1.${PLAIN} 安装 / 重置 (重新生成随机 Padding)"
-        echo -e " ${GREEN}2.${PLAIN} 查看配置信息"
-        echo -e " ${GREEN}3.${PLAIN} 查看日志"
-        # 【修复】这里 echo -p 改为 echo -e
-        echo -e " ${YELLOW}5.${PLAIN} 修改端口/域名 (触发重新随机化)"
-        echo -e " ${RED}9.${PLAIN} 卸载"
-        echo -e " ${GREEN}0.${PLAIN} 退出"
-        echo -e "----------------------------------------"
-        read -p " 选择: " num
-        case "$num" in
-            1) first_install ;;
-            2) show_result ;;
-            3) journalctl -u anytls -f ;;
-            5) first_install ;; 
-            9) systemctl stop anytls; systemctl disable anytls; rm -rf "$INSTALL_DIR" "$CONFIG_DIR" "$TARGET_BIN" "$SERVICE_FILE"; echo "已卸载"; exit 0 ;;
-            0) exit 0 ;;
-            *) echo -e "${RED}请输入正确的数字${PLAIN}"; sleep 1 ;;
-        esac
-    done
-}
-
-check_root
-install_global "$@"
-menu
+ensure_root
+main
