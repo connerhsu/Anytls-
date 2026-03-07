@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+# https://github.com/GeorgianaBlake/AnyTLS
 # AnyTLS一键管理脚本：安装/更新/查看/更改端口/更改密码/删除/快捷指令/Padding
 # 适配 Debian/Ubuntu (apt) 与 CentOS/RHEL/Alma/Rocky
 # 兼容 arm64 和 amd64 两种系统架构
 
-set -euo pipefail
+# 移除 set -euo pipefail 以防止脚本因非致命错误静默退出
+# set -euo pipefail 
 
 CONFIG_DIR="/etc/AnyTLS" # 配置目录
 ANYTLS_SNAP_DIR="/tmp/anytls_install_$$" # 临时目录
@@ -12,7 +14,7 @@ ANYTLS_SERVICE_NAME="anytls.service" # 服务
 ANYTLS_SERVICE_FILE="/etc/systemd/system/${ANYTLS_SERVICE_NAME}" # 服务目录
 ANYTLS_CONFIG_FILE="${CONFIG_DIR}/config.yaml" # 主配置文件
 TZ_DEFAULT="Asia/Shanghai" # 默认时区
-SHELL_VERSION="0.1.2" # 脚本版本
+SHELL_VERSION="0.1.3" # 脚本版本
 AT_ALIASES="AT_GeorgianaBlake" # AnyTLS别名
 SHORTCUT_FILE="/usr/bin/anytls" # 快捷指令路径
 
@@ -113,7 +115,7 @@ urlencode() {
 
 random_port() { shuf -i 2000-65000 -n 1; }
 gen_password() { cat /proc/sys/kernel/random/uuid; }
-gen_padding() { shuf -i 100-1500 -n 1; } # 生成随机padding
+gen_padding() { shuf -i 100-1500 -n 1; }
 
 valid_port() {
   local p="${1:-}"
@@ -176,18 +178,36 @@ get_latest_version() {
 
 get_install_version() {
   if [[ -f "$ANYTLS_SERVICE_FILE" ]]; then
-    grep '^X-AT-Version=' "$ANYTLS_SERVICE_FILE" | sed -E 's/^X-AT-Version=//'
+    # 增加 || true 防止 grep 没找到时退出脚本
+    grep '^X-AT-Version=' "$ANYTLS_SERVICE_FILE" 2>/dev/null | sed -E 's/^X-AT-Version=//' || echo "unknown"
   else
     echo "unknown"
   fi
 }
 
-# 创建快捷指令 anytls
+# 修复后的创建快捷指令逻辑
 create_shortcut() {
+  local current_script
+  # 尝试获取当前脚本的绝对路径
   if [[ -f "$0" ]]; then
-      cp -f "$0" "$SHORTCUT_FILE"
+      current_script=$(readlink -f "$0")
+  else
+      current_script=""
+  fi
+
+  # 只有当 $0 是真实文件，且不是 bash 本身，且不是目标文件时才复制
+  if [[ -n "$current_script" && -f "$current_script" && "$current_script" != "$SHORTCUT_FILE" ]]; then
+      cp -f "$current_script" "$SHORTCUT_FILE"
       chmod +x "$SHORTCUT_FILE"
-      print_ok "已创建全局快捷指令: anytls (输入 anytls 即可打开面板)"
+      print_ok "快捷指令 anytls 已更新，输入 'anytls' 即可管理"
+  elif [[ -f "install.sh" ]]; then
+      # 如果脚本名为 install.sh 且在当前目录
+      cp -f "install.sh" "$SHORTCUT_FILE"
+      chmod +x "$SHORTCUT_FILE"
+      print_ok "快捷指令 anytls 已修复"
+  else
+      # 无法自动复制时的提示
+      echo -e "${WARN} 无法自动创建快捷指令。请手动执行: cp <脚本文件名> /usr/bin/anytls"
   fi
 }
 
@@ -220,7 +240,6 @@ EOF
 }
 
 write_config() {
-  # 参数：端口 密码 Padding
   local port="$1" pass="$2" padding="$3"
   mkdir -p "$(dirname "${ANYTLS_CONFIG_FILE}")"
   cat > "${ANYTLS_CONFIG_FILE}" <<EOF
@@ -245,7 +264,6 @@ client_export() {
   ip=$(get_ip)
   local alias_enc
   alias_enc=$(urlencode "${AT_ALIASES}")
-  # 标准AnyTLS链接格式通常不包含padding，如果客户端支持，需根据特定客户端协议添加
   link="${pass}@${ip}:${port}/?insecure=1#${alias_enc}"
 
   echo -e "=========== AnyTLS 配置参数 ==========="
@@ -314,6 +332,8 @@ install_anytls() {
 
   write_systemd "$LATEST" "$port" "$pass"
   write_config "$port" "$pass" "$padding"
+  
+  # 放在最后执行，确保脚本本身存在
   create_shortcut
 
   restart_service
@@ -335,7 +355,6 @@ update_anytls() {
   LATEST=$(get_latest_version) || exit 1
   
   print_info "正在更新至 ${LATEST}..."
-  # 修复了原脚本这里写成 darwin 的bug，改为 linux
   AT_URL="https://github.com/anytls/anytls-go/releases/download/${LATEST}/anytls_${LATEST#v}_linux_${ARCH}.zip"
   
   mkdir -p "$ANYTLS_SNAP_DIR"
@@ -348,7 +367,6 @@ update_anytls() {
   chmod +x "$ANYTLS_SERVER"
   rm -rf "${ANYTLS_SNAP_DIR}"
 
-  # 读取旧配置
   local port pass padding
   port=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*.*:([0-9]+)[[:space:]]*$/\1/p' "${ANYTLS_CONFIG_FILE}")
   pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
@@ -356,7 +374,7 @@ update_anytls() {
 
   [[ -z "$port" ]] && port=$(random_port)
   [[ -z "$pass" ]] && pass=$(gen_password)
-  [[ -z "$padding" ]] && padding=$(gen_padding) # 如果旧配置没有padding，则生成一个新的
+  [[ -z "$padding" ]] && padding=$(gen_padding)
 
   write_systemd "$LATEST" "$port" "$pass"
   write_config "$port" "$pass" "$padding"
@@ -430,10 +448,13 @@ view_config() {
 }
 
 main() {
+  # 启动时先创建快捷方式，确保修复
+  create_shortcut
+
   while true; do
     clear
     hr
-    echo -e " AnyTLS 一键脚本 (Enhanced)"
+    echo -e " AnyTLS 一键脚本 (Fixed)"
     echo -e " 快捷命令: anytls"
     echo -e " 版本: ${SHELL_VERSION}"
     echo -e " 状态：$(install_status_text) | Ver: $(get_install_version)"
