@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # https://github.com/connerhsu/Anytls-
-# AnyTLS 一键管理脚本 v0.1.7 (High Security Padding Edition)
+# AnyTLS 一键管理脚本 v0.1.8 (High Security Padding Edition)
 # 集成高级 padding_scheme，每一次连接都使用动态随机包长，无需每日更换
 # 适配 Debian/Ubuntu (apt) 与 CentOS/RHEL/Alma/Rocky
 # 兼容 arm64 和 amd64
-# 修改：引入 ShadowTLS-Menu 的自安装与快捷启动逻辑
 
 # ================= 配置区 =================
-# 更新为您的仓库地址，确保自更新和安装逻辑指向正确源
+# 脚本源地址，用于自更新和安装
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/connerhsu/Anytls-/main/Anytls.sh"
 # =========================================
 
@@ -18,11 +17,15 @@ ANYTLS_SERVICE_NAME="anytls.service"
 ANYTLS_SERVICE_FILE="/etc/systemd/system/${ANYTLS_SERVICE_NAME}"
 ANYTLS_CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="0.1.7" # 版本号更新
+SHELL_VERSION="0.1.8" 
 
-# --- 路径配置 (参考 ShadowTLS) ---
+# --- 路径配置 ---
+# 真实脚本存放位置
 INSTALL_PATH="/usr/local/bin/anytls_mgr"
+# 快捷指令软链接
 BIN_LINK="/usr/bin/anytls"
+# 旧版本可能残留的路径，用于清理
+OLD_BIN="/usr/local/bin/anytls"
 # -------------------------------
 
 # 颜色配置
@@ -62,42 +65,43 @@ ensure_root() {
   fi
 }
 
-# --- 自安装/唤出逻辑 (参考 ShadowTLS) ---
+# --- 自安装/唤出逻辑 (核心修复) ---
 install_global() {
-    # 如果当前脚本不是安装路径下的脚本
+    # 如果当前运行的脚本不是安装路径下的那个文件
     if [[ "$0" != "$INSTALL_PATH" ]]; then
-        echo -e "${INFO} 正在安装/更新脚本到系统目录..."
+        echo -e "${INFO} 正在安装脚本到系统目录..."
         
-        # 尝试下载最新版，如果失败则尝试复制自身
+        # 1. 清理旧的、可能冲突的文件
+        rm -f "$OLD_BIN" "$INSTALL_PATH" "$BIN_LINK"
+
+        # 2. 强制从 GitHub 下载，不使用 cp "$0" (避免管道模式下的截断问题)
         if command -v wget >/dev/null; then 
             wget -qO "$INSTALL_PATH" "$SCRIPT_RAW_URL"
         else 
             curl -sSL -o "$INSTALL_PATH" "$SCRIPT_RAW_URL"
         fi
         
-        # 如果下载失败（可能是本地测试或网络问题），且当前文件存在，则复制当前文件
+        # 3. 检查下载是否成功（检查文件是否存在且不为空）
         if [[ ! -s "$INSTALL_PATH" ]]; then 
-             if [[ -f "$0" ]]; then
-                cp "$0" "$INSTALL_PATH"
-             else
-                print_error "脚本下载失败且无法本地复制！"
-                exit 1
-             fi
+             print_error "脚本下载失败！请检查网络或 URL。"
+             rm -f "$INSTALL_PATH"
+             exit 1
         fi
         
+        # 4. 赋予权限并建立链接
         chmod +x "$INSTALL_PATH"
         ln -sf "$INSTALL_PATH" "$BIN_LINK"
         
-        print_ok "快捷指令已更新: anytls"
+        print_ok "快捷指令已修复: anytls"
+        sleep 1
         
-        # 重新执行安装路径下的脚本，并接管输入输出
+        # 5. 重新执行安装好的脚本，并接管输入输出
         exec bash "$INSTALL_PATH" "$@" < /dev/tty
     fi
 }
 
 # --- 脚本自更新检查 ---
 check_self_update() {
-  # 只有在安装路径运行时才检查更新
   if [[ "$0" != "$INSTALL_PATH" ]]; then return; fi
   
   local remote_version
@@ -105,7 +109,6 @@ check_self_update() {
   if [[ -z "$remote_version" ]]; then return; fi
   if [[ "$remote_version" != "$SHELL_VERSION" ]]; then
     print_info "发现脚本新版本: ${remote_version} (当前: ${SHELL_VERSION})"
-    # 可以在这里添加自动更新的提示，或者依赖 install_global 的逻辑
   fi
 }
 
@@ -245,12 +248,11 @@ WantedBy=multi-user.target
 EOF
 }
 
-# 核心修改：写入高级 padding_scheme
+# 写入高级 padding_scheme
 write_config() {
   local port="$1" pass="$2"
   mkdir -p "$(dirname "${ANYTLS_CONFIG_FILE}")"
   
-  # 这里写入优化后的 scheme
   cat > "${ANYTLS_CONFIG_FILE}" <<EOF
 listen: :${port}
 padding_scheme:
@@ -275,7 +277,6 @@ client_export() {
   port=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*.*:([0-9]+)[[:space:]]*$/\1/p' "${ANYTLS_CONFIG_FILE}")
   pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
   
-  # 检查是否使用了 Scheme
   if grep -q "padding_scheme:" "${ANYTLS_CONFIG_FILE}"; then
     padding_info="${Green}已启用高级动态 Scheme (更安全)${Font}"
   else
@@ -285,10 +286,7 @@ client_export() {
   fi
   
   ip=$(get_ip)
-  local alias_enc
-  alias_enc=$(urlencode "${AT_ALIASES}")
-  # Scheme 模式下，链接本身不需要体现 scheme 细节，客户端只需支持 tls 即可
-  link="${pass}@${ip}:${port}/?insecure=1#${alias_enc}"
+  link="${pass}@${ip}:${port}/?insecure=1#AnyTLS"
 
   echo -e "=========== AnyTLS 配置参数 ==========="
   echo -e " 地址: ${ip}"
@@ -348,9 +346,8 @@ install_anytls() {
   pass=$(gen_password)
 
   write_systemd "$LATEST" "$port" "$pass"
-  write_config "$port" "$pass" # 默认写入高级 Scheme
+  write_config "$port" "$pass" 
   
-  # create_shortcut 已移除，由 install_global 接管
   restart_service
   
   sleep 2
@@ -379,7 +376,6 @@ update_anytls() {
   chmod +x "$ANYTLS_SERVER"
   rm -rf "${ANYTLS_SNAP_DIR}"
 
-  # 更新时，我们保留原有的端口密码，但强制升级配置文件为 Scheme 格式（为了安全）
   local port pass
   port=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*.*:([0-9]+)[[:space:]]*$/\1/p' "${ANYTLS_CONFIG_FILE}")
   pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
@@ -399,7 +395,6 @@ uninstall_anytls() {
   read -p "确认卸载？(y/N): " ans
   [[ "${ans:-N}" != [yY] ]] && echo "已取消" && return
   
-  # 清理旧的定时任务（如果之前设置过）
   crontab -l 2>/dev/null | grep -v "auto_padding.sh" | crontab -
   rm -f "${CONFIG_DIR}/auto_padding.sh"
 
@@ -442,7 +437,6 @@ set_password() {
   client_export
 }
 
-# 恢复默认高级方案（如果用户手动改坏了）
 reset_scheme() {
   ! is_installed && print_error "未安装" && return 1
   local port pass
@@ -461,7 +455,6 @@ view_config() {
 }
 
 main() {
-  # create_shortcut 已移除
   check_self_update 
 
   while true; do
@@ -498,5 +491,5 @@ main() {
 }
 
 ensure_root
-install_global # 优先执行自安装检查
+install_global "$@"
 main "$@"
