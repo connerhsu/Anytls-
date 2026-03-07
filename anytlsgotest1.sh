@@ -1,73 +1,70 @@
 #!/usr/bin/env bash
-# https://github.com/GeorgianaBlake/AnyTLS
-# AnyTLS 一键管理脚本 v0.1.7 (Auto-Repair Edition)
-# 兼容 arm64 和 amd64
+# AnyTLS 一键管理脚本 v0.1.8 (Auto-Deployment Edition)
+# 适配：每次运行一键命令均会自动同步到本地 /usr/local/bin/anytls
 
 # ================= 配置区 =================
-SCRIPT_RAW_URL="https://raw.githubusercontent.com/GeorgianaBlake/AnyTLS/main/install.sh"
+# 请确保此处的 URL 指向你自己的 GitHub 脚本地址
+SCRIPT_RAW_URL="https://raw.githubusercontent.com/connerhsu/Anytls-/main/anytlsgotest1.sh"
 # =========================================
 
 CONFIG_DIR="/etc/AnyTLS"
-ANYTLS_SNAP_DIR="/tmp/anytls_install_$$"
 ANYTLS_SERVER="${CONFIG_DIR}/server"
 ANYTLS_SERVICE_NAME="anytls.service"
 ANYTLS_SERVICE_FILE="/etc/systemd/system/${ANYTLS_SERVICE_NAME}"
 ANYTLS_CONFIG_FILE="${CONFIG_DIR}/config.yaml"
-TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="0.1.7" 
-AT_ALIASES="AT_GeorgianaBlake"
 SHORTCUT_FILE="/usr/local/bin/anytls"
 
-# 颜色配置
-Font="\033[0m"
-Red="\033[31m"
+# 颜色
 Green="\033[32m"
-Yellow="\033[33m"
-Blue="\033[34m"
-Cyan="\033[36m"
-RedBG="\033[41m"
+Red="\033[31m"
+Font="\033[0m"
 OK="${Green}[OK]${Font}"
 ERROR="${Red}[ERROR]${Font}"
-WARN="${Yellow}[WARN]${Font}"
-INFO="${Cyan}[INFO]${Font}"
 
-print_ok() { echo -e "${OK}${Blue} $1 ${Font}"; }
-print_info() { echo -e "${INFO}${Cyan} $1 ${Font}"; }
-print_error() { echo -e "${ERROR} ${RedBG} $1 ${Font}"; }
+print_ok() { echo -e "${OK} $1"; }
+print_error() { echo -e "${ERROR} $1"; }
 
-# --- 核心修改：支持管道运行下的快捷方式修复 ---
+# --- 核心修复：处理管道运行并强制同步本地 ---
 create_shortcut() {
-  local current_script
-  current_script=$(readlink -f "$0" 2>/dev/null)
-  
-  # 判断是否在管道中运行或文件不存在
-  if [[ "$0" == "bash" || "$0" == "-" || ! -f "$current_script" ]]; then
-      print_info "检测到在线运行，正在同步脚本到本地..."
-      curl -fsSL "$SCRIPT_RAW_URL" -o "$SHORTCUT_FILE"
-      chmod +x "$SHORTCUT_FILE"
-  elif [[ "$current_script" != "$SHORTCUT_FILE" ]]; then
-      cp -f "$current_script" "$SHORTCUT_FILE"
-      chmod +x "$SHORTCUT_FILE"
-  fi
-  
-  # 清理旧路径并刷新缓存
-  [[ -f "/usr/bin/anytls" ]] && rm -f "/usr/bin/anytls"
-  hash -r
+    # 逻辑：不论从哪运行，都强制从远程下载最新版覆盖到本地 bin 目录
+    # 这样可以避开 cp: cannot stat '/proc/.../fd/pipe' 的报错
+    curl -fsSL "$SCRIPT_RAW_URL" -o "$SHORTCUT_FILE"
+    if [[ $? -eq 0 ]]; then
+        chmod +x "$SHORTCUT_FILE"
+        # 清理旧路径并刷新缓存
+        [[ -f "/usr/bin/anytls" ]] && rm -f "/usr/bin/anytls"
+        hash -r
+        print_ok "快捷指令 anytls 已成功同步到本地并刷新缓存"
+    else
+        print_error "同步本地快捷指令失败，请检查网络"
+    fi
 }
 
 ensure_root() {
-  if [[ $EUID -ne 0 ]]; then
-    clear
-    echo "Error: 必须使用 root 运行本脚本!" 1>&2
-    exit 1
-  fi
+    [[ $EUID -ne 0 ]] && echo "Error: 必须使用 root 运行!" && exit 1
 }
 
-# (其余功能函数保持不变，为节省篇幅略，确保你的本地副本包含全部功能)
-# ... [此处包含你之前代码中的 get_arch, install_anytls, write_config 等全部函数] ...
+# --- 简单的菜单演示（请根据需要在此补充完整的 AnyTLS 安装逻辑） ---
+main_menu() {
+    clear
+    echo "------------------------------------------"
+    echo "  AnyTLS 一键脚本 - 快捷命令修复版"
+    echo "  快捷命令: anytls"
+    echo "------------------------------------------"
+    echo " 1. 安装/更新 AnyTLS"
+    echo " 2. 查看配置"
+    echo " 0. 退出"
+    echo "------------------------------------------"
+    read -p "请输入数字: " choice
+    case "${choice}" in
+        1) echo "执行安装逻辑...";;
+        2) echo "执行查看逻辑...";;
+        0) exit 0;;
+        *) echo "无效输入";;
+    esac
+}
 
-# 关键：在 main 开始前就执行修复
-main() {
-  ensure_root
-  create_shortcut
-  # ... 菜单循环代码 ...
+# 程序入口
+ensure_root
+create_shortcut
+main_menu
