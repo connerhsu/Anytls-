@@ -1,13 +1,68 @@
 #!/usr/bin/env bash
-# https://github.com/GeorgianaBlake/AnyTLS
-# AnyTLS 一键管理脚本 v0.1.6 (High Security Padding Edition)
-# 集成高级 padding_scheme，每一次连接都使用动态随机包长，无需每日更换
-# 适配 Debian/Ubuntu (apt) 与 CentOS/RHEL/Alma/Rocky
-# 兼容 arm64 和 amd64
+# =========================================================
+# Anytls-Go 一键管理脚本 (修复版 v0.1.9)
+# 修复: 解决 curl 管道安装时的截断报错与快捷键丢失问题
+# =========================================================
 
-# ================= 配置区 =================
-SCRIPT_RAW_URL="https://raw.githubusercontent.com/GeorgianaBlake/AnyTLS/main/install.sh"
-# =========================================
+# --- 1. 定义关键路径 (标准化路径，防止混淆) ---
+# 脚本真实存放位置
+INSTALL_PATH="/usr/local/bin/anytls"
+# 快捷指令 (软链接)
+BIN_LINK="/usr/bin/anytls"
+# 脚本下载源 (请确保这是你的 raw 地址)
+SCRIPT_URL="https://raw.githubusercontent.com/connerhsu/Anytls-/main/Anytls.sh"
+
+# --- 2. 颜色配置 ---
+Red="\033[31m"
+Green="\033[32m"
+Yellow="\033[33m"
+Blue="\033[34m"
+Cyan="\033[36m"
+Font="\033[0m"
+
+# --- 3. 核心：自安装与接管逻辑 ---
+install_and_exec() {
+    # 如果当前运行的脚本 不等于 安装路径 (说明是 curl 管道运行 或 第一次运行)
+    if [[ "$0" != "$INSTALL_PATH" ]]; then
+        echo -e "${Cyan}[INFO] 正在初始化安装环境...${Font}"
+        
+        # 1. 强制清理旧的残留文件，防止冲突
+        rm -f "$INSTALL_PATH" "$BIN_LINK" "/usr/local/bin/anytls_mgr"
+        
+        # 2. 下载脚本到系统目录
+        if command -v wget >/dev/null; then
+            wget -qO "$INSTALL_PATH" "$SCRIPT_URL"
+        else
+            curl -sSL -o "$INSTALL_PATH" "$SCRIPT_URL"
+        fi
+        
+        # 3. 验证下载是否成功
+        if [[ ! -s "$INSTALL_PATH" ]]; then
+            echo -e "${Red}[ERROR] 脚本下载失败，请检查网络连接。${Font}"
+            exit 1
+        fi
+        
+        # 4. 赋予执行权限
+        chmod +x "$INSTALL_PATH"
+        
+        # 5. 创建快捷指令 (anytls)
+        ln -sf "$INSTALL_PATH" "$BIN_LINK"
+        
+        echo -e "${Green}[OK] 快捷指令已修复: anytls${Font}"
+        echo -e "${Green}[OK] 正在启动管理菜单...${Font}"
+        sleep 1
+        
+        # 6. 【关键】使用 exec 切换进程，脱离 curl 管道，防止“unexpected end of file”
+        exec bash "$INSTALL_PATH" "$@"
+    fi
+}
+
+# 立即执行安装检查 (这行代码必须放在最前面)
+install_and_exec "$@"
+
+# =========================================================
+# 以下是原有业务逻辑 (已清理冗余代码)
+# =========================================================
 
 CONFIG_DIR="/etc/AnyTLS"
 ANYTLS_SNAP_DIR="/tmp/anytls_install_$$"
@@ -16,57 +71,29 @@ ANYTLS_SERVICE_NAME="anytls.service"
 ANYTLS_SERVICE_FILE="/etc/systemd/system/${ANYTLS_SERVICE_NAME}"
 ANYTLS_CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="0.1.6" # 版本号更新
-AT_ALIASES="AT_GeorgianaBlake"
-SHORTCUT_FILE="/usr/bin/anytls"
+SHELL_VERSION="0.1.9"
 
-# 颜色配置
-Font="\033[0m"
-Red="\033[31m"
-Green="\033[32m"
-Yellow="\033[33m"
-Blue="\033[34m"
-Cyan="\033[36m"
-RedBG="\033[41m"
-OK="${Green}[OK]${Font}"
-ERROR="${Red}[ERROR]${Font}"
-WARN="${Yellow}[WARN]${Font}"
-INFO="${Cyan}[INFO]${Font}"
-
-print_ok() { echo -e "${OK}${Blue} $1 ${Font}"; }
-print_info() { echo -e "${INFO}${Cyan} $1 ${Font}"; }
-print_error() { echo -e "${ERROR} ${RedBG} $1 ${Font}"; }
-
-judge() {
-  if [[ 0 -eq $? ]]; then
-    print_ok "$1 完成"
-    sleep 1
-  else
-    print_error "$1 失败"
-    exit 1
-  fi
-}
-
-trap 'echo -e "\n${WARN} 已中断"; exit 1' INT
+print_ok() { echo -e "${Green}[OK]${Blue} $1 ${Font}"; }
+print_info() { echo -e "${Cyan}[INFO]${Cyan} $1 ${Font}"; }
+print_error() { echo -e "${Red}[ERROR] ${Red} $1 ${Font}"; }
 
 ensure_root() {
   if [[ $EUID -ne 0 ]]; then
-    clear
     echo "Error: 必须使用 root 运行本脚本!" 1>&2
     exit 1
   fi
 }
 
-# --- 脚本自更新 ---
+# --- 脚本自更新检查 ---
 check_self_update() {
-  if [[ "$0" != "$SHORTCUT_FILE" ]]; then return; fi
-  local remote_version
-  remote_version=$(curl -fsSL --connect-timeout 3 -H "Cache-Control: no-cache" "$SCRIPT_RAW_URL" | grep 'SHELL_VERSION="' | head -1 | cut -d'"' -f2)
-  if [[ -z "$remote_version" ]]; then return; fi
-  if [[ "$remote_version" != "$SHELL_VERSION" ]]; then
-    print_info "发现脚本新版本: ${remote_version} (当前: ${SHELL_VERSION})"
-    # 暂时禁用自动覆盖，因为本脚本是定制的高级Padding版
-    # print_info "正在自动同步..."
+  # 只有在正式安装路径下才检查更新
+  if [[ "$0" == "$INSTALL_PATH" ]]; then 
+      local remote_version
+      remote_version=$(curl -fsSL --connect-timeout 3 -H "Cache-Control: no-cache" "$SCRIPT_URL" | grep 'SHELL_VERSION="' | head -1 | cut -d'"' -f2)
+      if [[ -n "$remote_version" && "$remote_version" != "$SHELL_VERSION" ]]; then
+        print_info "发现新版本: ${remote_version} (当前: ${SHELL_VERSION})"
+        # 可以在这里添加自动更新提示
+      fi
   fi
 }
 
@@ -96,10 +123,6 @@ os_install() {
   fi
 }
 
-pause() { read -rp "按回车返回菜单..." _; }
-quit() { exit 0; }
-hr() { printf '%*s\n' 40 '' | tr ' ' '='; }
-
 close_wall() {
   for svc in firewalld nftables ufw; do
     if systemctl list-unit-files | grep -q "^${svc}.service"; then
@@ -108,18 +131,6 @@ close_wall() {
         systemctl disable "$svc" 2>/dev/null || true
       fi
     fi
-  done
-}
-
-urlencode() {
-  local s="$1"
-  local i c
-  for (( i=0; i<${#s}; i++ )); do
-    c=${s:$i:1}
-    case "$c" in
-      [a-zA-Z0-9.~_-]) printf '%s' "$c" ;;
-      *) printf '%%%02X' "'$c" ;;
-    esac
   done
 }
 
@@ -137,8 +148,6 @@ is_port_used() {
     ss -tuln | awk '{print $5}' | grep -Eq "[:.]${port}([[:space:]]|$)"
   elif command -v lsof >/dev/null 2>&1; then
     lsof -i :"$port" -sTCP:LISTEN >/dev/null 2>&1
-  elif command -v netstat >/dev/null 2>&1; then
-    netstat -tuln 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$"
   else
     return 1
   fi
@@ -157,18 +166,16 @@ read_port_interactive() {
 }
 
 get_ip() {
-  local ip4 ip6
-  ip4=$(curl -s -4 http://www.cloudflare.com/cdn-cgi/trace | awk -F= '/^ip=/{print $2}')
-  [[ -n "${ip4}" ]] && echo "${ip4}" && return
-  ip6=$(curl -s -6 http://www.cloudflare.com/cdn-cgi/trace | awk -F= '/^ip=/{print $2}')
-  [[ -n "${ip6}" ]] && echo "${ip6}" && return
-  curl -s https://api.ipify.org || true
+  local ip
+  ip=$(curl -s4 -m 5 https://api.ipify.org)
+  [[ -z "$ip" ]] && ip=$(curl -s4 -m 5 http://checkip.amazonaws.com)
+  echo "${ip:-127.0.0.1}"
 }
 
 get_latest_version() {
   local version
   version=$(curl -s https://api.github.com/repos/anytls/anytls-go/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-  if [[ -z "$version" ]]; then echo "v0.0.8"; return 0; fi # Fallback if API fails
+  if [[ -z "$version" ]]; then echo "v0.0.8"; return 0; fi 
   echo "$version"
 }
 
@@ -177,20 +184,6 @@ get_install_version() {
     grep '^X-AT-Version=' "$ANYTLS_SERVICE_FILE" 2>/dev/null | sed -E 's/^X-AT-Version=//' || echo "unknown"
   else
     echo "unknown"
-  fi
-}
-
-create_shortcut() {
-  local current_script
-  [[ -f "$0" ]] && current_script=$(readlink -f "$0") || current_script=""
-  if [[ -n "$current_script" && -f "$current_script" && "$current_script" != "$SHORTCUT_FILE" ]]; then
-      cp -f "$current_script" "$SHORTCUT_FILE"
-      chmod +x "$SHORTCUT_FILE"
-      print_ok "快捷指令 anytls 已更新"
-  elif [[ -f "install.sh" ]]; then
-      cp -f "install.sh" "$SHORTCUT_FILE"
-      chmod +x "$SHORTCUT_FILE"
-      print_ok "快捷指令 anytls 已修复"
   fi
 }
 
@@ -212,20 +205,15 @@ ExecStart="${ANYTLS_SERVER}" -l 0.0.0.0:${port} -p "${pass}"
 Restart=on-failure
 RestartSec=10s
 LimitNOFILE=65535
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
 }
 
-# 核心修改：写入高级 padding_scheme
 write_config() {
   local port="$1" pass="$2"
   mkdir -p "$(dirname "${ANYTLS_CONFIG_FILE}")"
-  
-  # 这里写入优化后的 scheme
   cat > "${ANYTLS_CONFIG_FILE}" <<EOF
 listen: :${port}
 padding_scheme:
@@ -250,42 +238,29 @@ client_export() {
   port=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*.*:([0-9]+)[[:space:]]*$/\1/p' "${ANYTLS_CONFIG_FILE}")
   pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
   
-  # 检查是否使用了 Scheme
   if grep -q "padding_scheme:" "${ANYTLS_CONFIG_FILE}"; then
     padding_info="${Green}已启用高级动态 Scheme (更安全)${Font}"
   else
-    local pad_val
-    pad_val=$(sed -nE 's/^[[:space:]]*padding:[[:space:]]*([0-9]+).*$/\1/p' "${ANYTLS_CONFIG_FILE}")
-    padding_info="${pad_val} (普通静态混淆)"
+    padding_info="普通静态混淆"
   fi
   
   ip=$(get_ip)
-  local alias_enc
-  alias_enc=$(urlencode "${AT_ALIASES}")
-  # Scheme 模式下，链接本身不需要体现 scheme 细节，客户端只需支持 tls 即可
-  link="${pass}@${ip}:${port}/?insecure=1#${alias_enc}"
+  link="${pass}@${ip}:${port}/?insecure=1#AnyTLS"
 
   echo -e "=========== AnyTLS 配置参数 ==========="
   echo -e " 地址: ${ip}"
   echo -e " 端口: ${port}"
   echo -e " 密码: ${pass}"
   echo -e " 混淆: ${padding_info}"
-  echo -e " 备注: 此配置使用动态包长，无需每日更换 Padding"
+  echo -e " 备注: 无需每日更换 Padding，全自动动态"
   echo -e "========================================="
   echo -e " URL链接:"
   echo -e " anytls://${link}"
   echo -e "========================================="
 }
 
-start_service() { systemctl start "${ANYTLS_SERVICE_NAME}"; sleep 1; status_service; }
-stop_service() { systemctl stop "${ANYTLS_SERVICE_NAME}"; }
-status_service() { systemctl status "${ANYTLS_SERVICE_NAME}" --no-pager; }
-log_service() { journalctl -u "${ANYTLS_SERVICE_NAME}" -f "$@"; }
-
-binary_exists() { [[ -x "${ANYTLS_SERVER}" ]]; }
-service_file_exists() { [[ -f "${ANYTLS_SERVICE_FILE}" ]]; }
-is_installed() { binary_exists || service_file_exists; }
 is_active() { systemctl is-active "${ANYTLS_SERVICE_NAME}" >/dev/null 2>&1; }
+is_installed() { [[ -f "$ANYTLS_SERVICE_FILE" ]]; }
 
 install_status_text() {
   if is_installed; then
@@ -314,7 +289,13 @@ install_anytls() {
   curl -L -o "${ANYTLS_SNAP_DIR}/anytls.zip" "$AT_URL" || { print_error "下载失败"; exit 1; }
   
   unzip -o "${ANYTLS_SNAP_DIR}/anytls.zip" -d "$ANYTLS_SNAP_DIR"
-  mv "${ANYTLS_SNAP_DIR}/anytls-server" "$ANYTLS_SERVER"
+  # 兼容不同zip包结构
+  if [[ -f "${ANYTLS_SNAP_DIR}/anytls-server" ]]; then
+      mv "${ANYTLS_SNAP_DIR}/anytls-server" "$ANYTLS_SERVER"
+  elif [[ -f "${ANYTLS_SNAP_DIR}/anytls" ]]; then
+      mv "${ANYTLS_SNAP_DIR}/anytls" "$ANYTLS_SERVER"
+  fi
+  
   chmod +x "$ANYTLS_SERVER"
   rm -rf "${ANYTLS_SNAP_DIR}"
 
@@ -323,18 +304,17 @@ install_anytls() {
   pass=$(gen_password)
 
   write_systemd "$LATEST" "$port" "$pass"
-  write_config "$port" "$pass" # 默认写入高级 Scheme
+  write_config "$port" "$pass" 
   
-  create_shortcut
   restart_service
   
   sleep 2
   if is_active; then
-    print_ok "AnyTLS 服务已启动 (High Security Mode)"
+    print_ok "AnyTLS 服务已启动"
     client_export
   else
     print_error "服务启动失败"
-    log_service -n 20
+    journalctl -u "${ANYTLS_SERVICE_NAME}" -n 10 --no-pager
   fi
 }
 
@@ -350,11 +330,14 @@ update_anytls() {
   
   systemctl stop "${ANYTLS_SERVICE_NAME}"
   unzip -o "${ANYTLS_SNAP_DIR}/anytls.zip" -d "$ANYTLS_SNAP_DIR"
-  mv "${ANYTLS_SNAP_DIR}/anytls-server" "$ANYTLS_SERVER"
+  if [[ -f "${ANYTLS_SNAP_DIR}/anytls-server" ]]; then
+      mv "${ANYTLS_SNAP_DIR}/anytls-server" "$ANYTLS_SERVER"
+  elif [[ -f "${ANYTLS_SNAP_DIR}/anytls" ]]; then
+      mv "${ANYTLS_SNAP_DIR}/anytls" "$ANYTLS_SERVER"
+  fi
   chmod +x "$ANYTLS_SERVER"
   rm -rf "${ANYTLS_SNAP_DIR}"
 
-  # 更新时，我们保留原有的端口密码，但强制升级配置文件为 Scheme 格式（为了安全）
   local port pass
   port=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*.*:([0-9]+)[[:space:]]*$/\1/p' "${ANYTLS_CONFIG_FILE}")
   pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
@@ -363,29 +346,24 @@ update_anytls() {
 
   write_systemd "$LATEST" "$port" "$pass"
   write_config "$port" "$pass"
-  create_shortcut
   
   restart_service
-  print_ok "更新完成，配置文件已升级为高级 Scheme"
+  print_ok "更新完成"
   client_export
 }
 
 uninstall_anytls() {
-  ! is_installed && print_error "未安装 AnyTLS" && return 1
   read -p "确认卸载？(y/N): " ans
   [[ "${ans:-N}" != [yY] ]] && echo "已取消" && return
   
-  # 清理旧的定时任务（如果之前设置过）
-  crontab -l 2>/dev/null | grep -v "auto_padding.sh" | crontab -
-  rm -f "${CONFIG_DIR}/auto_padding.sh"
-
   systemctl stop "${ANYTLS_SERVICE_NAME}"
   systemctl disable "${ANYTLS_SERVICE_NAME}"
   rm -f "${ANYTLS_SERVICE_FILE}"
-  rm -f "${SHORTCUT_FILE}"
+  rm -f "${BIN_LINK}" "${INSTALL_PATH}"
   systemctl daemon-reload
   rm -rf "${CONFIG_DIR}"
   print_ok "卸载完成"
+  exit 0
 }
 
 set_port() {
@@ -393,11 +371,10 @@ set_port() {
   local new_port pass
   new_port=$(read_port_interactive)
   pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
-  
   write_systemd "" "$new_port" "$pass"
   write_config "$new_port" "$pass"
   restart_service
-  print_ok "端口已更改为: $new_port"
+  print_ok "端口已更改"
   client_export
 }
 
@@ -406,7 +383,6 @@ set_password() {
   local new_pass port
   new_pass=$(gen_password)
   port=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*.*:([0-9]+)[[:space:]]*$/\1/p' "${ANYTLS_CONFIG_FILE}")
-  
   write_systemd "" "$port" "$new_pass"
   write_config "$port" "$new_pass"
   restart_service
@@ -414,60 +390,49 @@ set_password() {
   client_export
 }
 
-# 恢复默认高级方案（如果用户手动改坏了）
 reset_scheme() {
   ! is_installed && print_error "未安装" && return 1
   local port pass
   port=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*.*:([0-9]+)[[:space:]]*$/\1/p' "${ANYTLS_CONFIG_FILE}")
   pass=$(sed -nE 's/^[[:space:]]*password:[[:space:]]*(.*)$/\1/p' "${ANYTLS_CONFIG_FILE}")
-  
   write_config "$port" "$pass"
   restart_service
-  print_ok "已重置为默认高级 Scheme"
-  client_export
-}
-
-view_config() {
-  ! is_installed && print_error "未安装" && return 1
+  print_ok "已重置 Scheme"
   client_export
 }
 
 main() {
-  create_shortcut
-  check_self_update 
-
+  check_self_update
   while true; do
     clear
-    hr
-    echo -e " AnyTLS 一键脚本 (High Security)"
-    echo -e " 快捷命令: anytls"
-    echo -e " 脚本版本: ${SHELL_VERSION}"
+    echo -e " AnyTLS 一键脚本 (High Security) ${SHELL_VERSION}"
+    echo -e " -------------------------------------------"
     echo -e " 状态：$(install_status_text) | Ver: $(get_install_version)"
-    echo -e " 混淆模式: ${Green}高级动态 Scheme (实时随机)${Font}"
-    hr
-    echo -e "${Cyan}1. 安装/重装 AnyTLS${Font}"
-    echo -e "${Cyan}2. 更新 AnyTLS (强制升级配置)${Font}"
-    echo -e "${Cyan}3. 查看配置${Font}"
-    echo -e "${Cyan}4. 卸载 AnyTLS${Font}"
-    echo -e "${Cyan}5. 更改端口${Font}"
-    echo -e "${Cyan}6. 更改密码${Font}"
-    echo -e "${Cyan}7. 重置为默认高级 Scheme (修复配置)${Font}"
-    echo -e "${Cyan}0. 退出${Font}"
-    hr
-    read -p "请输入数字: " choice
+    echo -e " 快捷命令: ${Green}anytls${Font}"
+    echo -e " -------------------------------------------"
+    echo -e " 1. 安装/重装 AnyTLS"
+    echo -e " 2. 更新 AnyTLS (强制升级配置)"
+    echo -e " 3. 查看配置"
+    echo -e " 4. 卸载 AnyTLS"
+    echo -e " 5. 更改端口"
+    echo -e " 6. 更改密码"
+    echo -e " 7. 重置为默认高级 Scheme (修复配置)"
+    echo -e " 0. 退出"
+    echo -e " -------------------------------------------"
+    read -p " 请输入数字: " choice
     case "${choice}" in
-      1) install_anytls; pause ;;
-      2) update_anytls; pause ;;
-      3) view_config; pause ;;
-      4) uninstall_anytls; pause ;;
-      5) set_port; pause ;;
-      6) set_password; pause ;;
-      7) reset_scheme; pause ;;
+      1) install_anytls; read -rp "按回车返回..." ;;
+      2) update_anytls; read -rp "按回车返回..." ;;
+      3) client_export; read -rp "按回车返回..." ;;
+      4) uninstall_anytls ;;
+      5) set_port; read -rp "按回车返回..." ;;
+      6) set_password; read -rp "按回车返回..." ;;
+      7) reset_scheme; read -rp "按回车返回..." ;;
       0) exit 0 ;;
-      *) echo "无效选项"; pause ;;
+      *) echo "无效选项"; sleep 1 ;;
     esac
   done
 }
 
 ensure_root
-main
+main "$@"
