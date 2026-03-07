@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # https://github.com/GeorgianaBlake/AnyTLS
-# AnyTLS一键管理脚本：安装/更新/查看/更改端口/更改密码/删除/快捷指令/Padding
+# AnyTLS一键管理脚本：安装/更新/查看/更改端口/更改密码/删除/快捷指令/Padding/自动同步脚本
 # 适配 Debian/Ubuntu (apt) 与 CentOS/RHEL/Alma/Rocky
 # 兼容 arm64 和 amd64 两种系统架构
 
-# 移除 set -euo pipefail 以防止脚本因非致命错误静默退出
-# set -euo pipefail 
+# ================= 配置区 =================
+# 请修改下面的链接为您 GitHub 仓库中该脚本的【Raw】链接
+# 只有当仓库里的版本号高于本地版本号时，才会触发更新
+SCRIPT_RAW_URL="https://raw.githubusercontent.com/GeorgianaBlake/AnyTLS/main/install.sh"
+# =========================================
 
 CONFIG_DIR="/etc/AnyTLS" # 配置目录
 ANYTLS_SNAP_DIR="/tmp/anytls_install_$$" # 临时目录
@@ -14,7 +17,7 @@ ANYTLS_SERVICE_NAME="anytls.service" # 服务
 ANYTLS_SERVICE_FILE="/etc/systemd/system/${ANYTLS_SERVICE_NAME}" # 服务目录
 ANYTLS_CONFIG_FILE="${CONFIG_DIR}/config.yaml" # 主配置文件
 TZ_DEFAULT="Asia/Shanghai" # 默认时区
-SHELL_VERSION="0.1.3" # 脚本版本
+SHELL_VERSION="0.1.4" # 脚本版本
 AT_ALIASES="AT_GeorgianaBlake" # AnyTLS别名
 SHORTCUT_FILE="/usr/bin/anytls" # 快捷指令路径
 
@@ -52,6 +55,39 @@ ensure_root() {
     clear
     echo "Error: 必须使用 root 运行本脚本!" 1>&2
     exit 1
+  fi
+}
+
+# --- 脚本自更新功能 ---
+check_self_update() {
+  # 只有通过快捷指令运行时才检查更新，避免安装过程中重复检查
+  if [[ "$0" != "$SHORTCUT_FILE" ]]; then return; fi
+
+  # 简单的网络检查，超时时间3秒
+  local remote_version
+  # 从远程获取脚本内容，提取 SHELL_VERSION="x.x.x" 中的版本号
+  remote_version=$(curl -fsSL --connect-timeout 3 -H "Cache-Control: no-cache" "$SCRIPT_RAW_URL" | grep 'SHELL_VERSION="' | head -1 | cut -d'"' -f2)
+
+  if [[ -z "$remote_version" ]]; then
+    # 如果获取失败（网络问题或GitHub源文件不存在），仅提示不退出
+    # echo -e "${WARN} 无法连接 GitHub 检测脚本更新，跳过..." 
+    return
+  fi
+
+  # 如果远程版本与当前版本不一致（通常是远程版本更大），则更新
+  if [[ "$remote_version" != "$SHELL_VERSION" ]]; then
+    print_info "发现脚本新版本: ${remote_version} (当前: ${SHELL_VERSION})"
+    print_info "正在自动同步最新脚本..."
+    
+    if curl -fsSL -H "Cache-Control: no-cache" -o "$SHORTCUT_FILE" "$SCRIPT_RAW_URL"; then
+      chmod +x "$SHORTCUT_FILE"
+      print_ok "脚本同步完成，正在重新加载..."
+      sleep 1
+      exec "$SHORTCUT_FILE" "$@"
+    else
+      print_error "脚本同步失败，继续使用当前版本。"
+      sleep 1
+    fi
   fi
 }
 
@@ -178,7 +214,6 @@ get_latest_version() {
 
 get_install_version() {
   if [[ -f "$ANYTLS_SERVICE_FILE" ]]; then
-    # 增加 || true 防止 grep 没找到时退出脚本
     grep '^X-AT-Version=' "$ANYTLS_SERVICE_FILE" 2>/dev/null | sed -E 's/^X-AT-Version=//' || echo "unknown"
   else
     echo "unknown"
@@ -188,25 +223,21 @@ get_install_version() {
 # 修复后的创建快捷指令逻辑
 create_shortcut() {
   local current_script
-  # 尝试获取当前脚本的绝对路径
   if [[ -f "$0" ]]; then
       current_script=$(readlink -f "$0")
   else
       current_script=""
   fi
 
-  # 只有当 $0 是真实文件，且不是 bash 本身，且不是目标文件时才复制
   if [[ -n "$current_script" && -f "$current_script" && "$current_script" != "$SHORTCUT_FILE" ]]; then
       cp -f "$current_script" "$SHORTCUT_FILE"
       chmod +x "$SHORTCUT_FILE"
       print_ok "快捷指令 anytls 已更新，输入 'anytls' 即可管理"
   elif [[ -f "install.sh" ]]; then
-      # 如果脚本名为 install.sh 且在当前目录
       cp -f "install.sh" "$SHORTCUT_FILE"
       chmod +x "$SHORTCUT_FILE"
       print_ok "快捷指令 anytls 已修复"
   else
-      # 无法自动复制时的提示
       echo -e "${WARN} 无法自动创建快捷指令。请手动执行: cp <脚本文件名> /usr/bin/anytls"
   fi
 }
@@ -333,9 +364,7 @@ install_anytls() {
   write_systemd "$LATEST" "$port" "$pass"
   write_config "$port" "$pass" "$padding"
   
-  # 放在最后执行，确保脚本本身存在
   create_shortcut
-
   restart_service
   
   sleep 2
@@ -448,19 +477,19 @@ view_config() {
 }
 
 main() {
-  # 启动时先创建快捷方式，确保修复
   create_shortcut
+  check_self_update # 每次运行菜单前检查脚本更新
 
   while true; do
     clear
     hr
-    echo -e " AnyTLS 一键脚本 (Fixed)"
+    echo -e " AnyTLS 一键脚本 (Auto-Sync)"
     echo -e " 快捷命令: anytls"
-    echo -e " 版本: ${SHELL_VERSION}"
+    echo -e " 脚本版本: ${SHELL_VERSION}"
     echo -e " 状态：$(install_status_text) | Ver: $(get_install_version)"
     hr
     echo -e "${Cyan}1. 安装/重装 AnyTLS${Font}"
-    echo -e "${Cyan}2. 更新 AnyTLS${Font}"
+    echo -e "${Cyan}2. 更新 AnyTLS (二进制)${Font}"
     echo -e "${Cyan}3. 查看配置${Font}"
     echo -e "${Cyan}4. 卸载 AnyTLS${Font}"
     echo -e "${Cyan}5. 更改端口${Font}"
