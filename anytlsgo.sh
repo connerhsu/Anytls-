@@ -19,7 +19,7 @@ TZ_DEFAULT="Asia/Shanghai"
 SHELL_VERSION="0.1.6" 
 AT_ALIASES="AT_GeorgianaBlake"
 
-# --- 核心修复点：将路径修改为报错信息中的路径 ---
+# --- 关键修改：统一使用 /usr/local/bin 路径 ---
 SHORTCUT_FILE="/usr/local/bin/anytls"
 
 # 颜色配置
@@ -56,6 +56,23 @@ ensure_root() {
     clear
     echo "Error: 必须使用 root 运行本脚本!" 1>&2
     exit 1
+  fi
+}
+
+# --- 快捷命令修复逻辑 ---
+create_shortcut() {
+  local current_script
+  current_script=$(readlink -f "$0")
+  
+  # 按照你的思路：如果当前运行的不是快捷路径，则强制同步过去
+  if [[ "$current_script" != "$SHORTCUT_FILE" ]]; then
+      cp -f "$current_script" "$SHORTCUT_FILE"
+      chmod +x "$SHORTCUT_FILE"
+      # 清理旧的 /usr/bin 残留防止冲突
+      [[ -f "/usr/bin/anytls" ]] && rm -f "/usr/bin/anytls"
+      # 强制刷新 Bash 哈希缓存，解决 No such file 报错
+      hash -r
+      print_ok "快捷指令 anytls 已重新部署并刷新缓存"
   fi
 }
 
@@ -176,20 +193,6 @@ get_install_version() {
     grep '^X-AT-Version=' "$ANYTLS_SERVICE_FILE" 2>/dev/null | sed -E 's/^X-AT-Version=//' || echo "unknown"
   else
     echo "unknown"
-  fi
-}
-
-# --- 核心修复函数：强制覆盖坏掉的快捷方式 ---
-create_shortcut() {
-  local current_script
-  current_script=$(readlink -f "$0")
-  
-  if [[ "$current_script" != "$SHORTCUT_FILE" ]]; then
-      cp -f "$current_script" "$SHORTCUT_FILE"
-      chmod +x "$SHORTCUT_FILE"
-      # 清理可能存在的旧路径干扰
-      [[ -f "/usr/bin/anytls" ]] && rm -f "/usr/bin/anytls"
-      print_ok "快捷指令 anytls 已重新定向至 $SHORTCUT_FILE"
   fi
 }
 
